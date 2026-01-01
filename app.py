@@ -5,35 +5,21 @@ import re
 from datetime import datetime
 import styles
 
-# --- הגדרת רוחב מלא (Wide Mode) ---
 st.set_page_config(page_title="SmartYield Pro", layout="wide")
-
-# הפעלת העיצוב
 styles.apply_styles()
 
-# --- CSS כפוי להרחבת הטבלה למקסימום ---
 st.markdown("""
 <style>
-    /* הרחבת הקונטיינר הראשי */
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-        padding-left: 1rem;
-        padding-right: 1rem;
-        max-width: 100% !important;
-    }
-    /* ביטול גלילה מיותרת בטבלה */
-    div[data-testid="stDataFrame"] {
-        width: 100%;
-    }
+    .block-container { max_width: 100% !important; padding: 1rem; }
+    div[data-testid="stDataFrame"] { width: 100%; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 1. מסד נתונים ---
+# --- 1. מסד נתונים (V13 - Smart Logic) ---
 def init_db():
-    conn = sqlite3.connect('smartyield_v11_clean.db')
+    conn = sqlite3.connect('smartyield_v13_logic.db')
     cursor = conn.cursor()
-    cursor.execute("CREATE TABLE IF NOT EXISTS listings (id INTEGER PRIMARY KEY, city TEXT, type TEXT, price INTEGER, sqm INTEGER, ppm INTEGER, confidence INTEGER, is_renewal INTEGER, address TEXT, date TEXT)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS listings (id INTEGER PRIMARY KEY, city TEXT, type TEXT, price INTEGER, sqm INTEGER, ppm INTEGER, confidence INTEGER, is_renewal INTEGER, address TEXT, original_text TEXT, date TEXT)")
     
     benchmarks = [
         ("תל אביב", 68000), ("ירושלים", 45000), ("נתניה", 33000), 
@@ -46,36 +32,20 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- פונקציית צייד הכתובות ---
 def extract_clean_address(text_segment):
-    # 1. רשימת מילים "אסורות" (זבל מאתרי אינטרנט)
-    blacklist = ["נגיש", "בקליק", "תפריט", "צור קשר", "whatsapp", "פייסבוק", "דירה למכירה", "נדל\"ן", "טלפון", "קישורים"]
-    
-    # 2. ניסיון למצוא תבנית של רחוב
-    # מחפש: רחוב/שד/דרך + מילים + מספר אופציונלי
+    blacklist = ["נגיש", "בקליק", "תפריט", "צור קשר", "whatsapp", "פייסבוק", "נדל\"ן", "טלפון"]
     street_match = re.search(r"(?:רחוב|רח'|שד'|שדרות|דרך|סמטת|שכונת)\s+([\u0590-\u05FF\"']+(?:\s+[\u0590-\u05FF\"']+)*\s*\d*)", text_segment)
     
     if street_match:
         address = street_match.group(0).strip()
-        # בדיקה שהכתובת לא מכילה מילה אסורה
-        if not any(bad_word in address for bad_word in blacklist):
-            return address
+        if not any(bad in address for bad in blacklist): return address
 
-    # 3. אם לא מצא רחוב, נסה לקחת משפט קצר ונקי
-    clean_lines = []
-    for line in text_segment.split('\n'):
-        line = line.strip()
-        if len(line) > 4 and len(line) < 40 and not any(bad in line for bad in blacklist):
-            clean_lines.append(line)
-    
-    if clean_lines:
-        return clean_lines[0] # מחזיר את השורה הנקייה הראשונה שנמצאה
-    
-    return "כתובת כללית"
+    clean_lines = [line.strip() for line in text_segment.split('\n') if 4 < len(line.strip()) < 40 and not any(bad in line for bad in blacklist)]
+    return clean_lines[0] if clean_lines else "אזור כללי"
 
-# --- 2. מנוע סריקה ---
+# --- 2. מנוע סריקה (כולל סינון מרחקים) ---
 def smart_parse(text):
-    conn = sqlite3.connect('smartyield_v11_clean.db')
+    conn = sqlite3.connect('smartyield_v13_logic.db')
     cursor = conn.cursor()
     cities = ["תל אביב", "ירושלים", "נתניה", "חיפה", "באר שבע", "רמת גן", "גבעתיים", 
               "הרצליה", "ראשון לציון", "פתח תקווה", "חולון", "אשדוד"]
@@ -84,7 +54,7 @@ def smart_parse(text):
     raw_ads = text.split('₪')
     count = 0
     
-    for i, ad in enumerate(raw_ads):
+    for ad in raw_ads:
         price_match = re.search(r'(\d{6,8})', ad)
         if not price_match: continue
         price = int(price_match.group(1))
@@ -98,23 +68,32 @@ def smart_parse(text):
         elif "דו משפחתי" in ad: p_type = "דו משפחתי"
         
         if city and (600000 < price < 35000000):
-            sqm_match = re.search(r'(\d{2,3})\s*(?:מ"ר|מר|מטר)', ad)
+            # --- תיקון קריטי: הסרת מרחקים לפני זיהוי מ"ר ---
+            # מנקים ביטויים כמו "100 מטר מהים", "200 מ' מהרכבת"
+            # הטקסט הזמני לחיפוש מ"ר בלבד
+            temp_ad_text = re.sub(r'(\d+)\s*(?:מטר|מ"ר|מ\')\s*(?:מהים|מהרכבת|מהחוף|מהקניון|מהפארק|מהמרכז)', '', ad)
+            
+            sqm_match = re.search(r'(\d{2,3})\s*(?:מ"ר|מר|מטר)', temp_ad_text)
             sqm = int(sqm_match.group(1)) if sqm_match else 100
             
-            conf = 50
-            if sqm_match: conf += 25
-            if len(ad) > 80: conf += 25
+            # בדיקת שפיות: אם המחיר למ"ר נמוך מ-5000, כנראה שיש טעות במ"ר (למשל וילה שזוהתה בטעות כ-1000 מ"ר)
+            # במקרה כזה נחזיר לברירת מחדל של 100 או נסמן כחשוד
+            if (price / sqm) < 4000: 
+                sqm = 100 # איפוס לברירת מחדל כדי לא ליצור עיוות
+                conf = 20 # ציון ביטחון נמוך מאוד
+            else:
+                conf = 50
+                if sqm_match: conf += 25
+                if len(ad) > 80: conf += 25
             
-            is_ren = 0
-            if "תמא" in ad or "פינוי" in ad or "התחדשות" in ad: is_ren = 1
+            is_ren = 1 if any(w in ad for w in ["תמא", "פינוי", "התחדשות"]) else 0
             
-            # שליחת הטקסט לניקוי יסודי
-            # אנו שולחים את 150 התווים שלפני המחיר ואחריו לניתוח
             context = ad[:150]
             clean_addr = extract_clean_address(context)
+            proof_snippet = ad[:100].replace('\n', ' ')
 
-            sql = "INSERT INTO listings (city, type, price, sqm, ppm, confidence, is_renewal, address, date) VALUES (?,?,?,?,?,?,?,?,?)"
-            val = (city, p_type, price, sqm, price // sqm, conf, is_ren, clean_addr, datetime.now().strftime("%d/%m/%Y"))
+            sql = "INSERT INTO listings (city, type, price, sqm, ppm, confidence, is_renewal, address, original_text, date) VALUES (?,?,?,?,?,?,?,?,?,?)"
+            val = (city, p_type, price, sqm, price // sqm, conf, is_ren, clean_addr, proof_snippet, datetime.now().strftime("%d/%m/%Y"))
             cursor.execute(sql, val)
             count += 1
             
@@ -125,12 +104,11 @@ def smart_parse(text):
 init_db()
 
 # --- 3. ממשק ---
-tab1, tab2, tab3 = st.tabs(["🚀 ניתוח נכסים", "📊 מאגר הזדמנויות", "⚙️ ניהול"])
+tab1, tab2, tab3 = st.tabs(["🚀 ניתוח נכסים", "📊 מאגר והוכחות", "⚙️ ניהול"])
 
 with tab1:
     st.markdown("<div class='analysis-box'>", unsafe_allow_html=True)
     st.subheader("הזנת נתונים")
-    st.info("המערכת מסננת אוטומטית טקסטים של נגישות ותפריטים.")
     raw_input = st.text_area("הדבק עמוד מודעות מלא:", height=250)
     if st.button("בצע ניתוח שוק"):
         if raw_input:
@@ -140,7 +118,7 @@ with tab1:
 
 with tab2:
     try:
-        conn = sqlite3.connect('smartyield_v11_clean.db')
+        conn = sqlite3.connect('smartyield_v13_logic.db')
         df = pd.read_sql("SELECT * FROM listings", conn)
         bench_df = pd.read_sql("SELECT * FROM benchmarks", conn)
         conn.close()
@@ -161,7 +139,7 @@ with tab2:
             display_df = df.rename(columns={
                 "city": "עיר", "address": "כתובת/אזור", "type": "סוג", "price": "מחיר", 
                 "sqm": "מ\"ר", "ppm": "למ\"ר", "profit": "רווח %", 
-                "confidence": "ביטחון", "is_renewal": "התחדשות"
+                "confidence": "ביטחון", "original_text": "אימות נתונים"
             })
 
             c1, c2, c3 = st.columns(3)
@@ -171,20 +149,19 @@ with tab2:
 
             st.markdown("---")
             
-            # שימוש בהגדרות עמודה כדי למנוע גלילה
             st.dataframe(
-                display_df[["עיר", "כתובת/אזור", "סוג", "מחיר", "מ\"ר", "למ\"ר", "רווח %", "ביטחון", "התחדשות"]].sort_values("רווח %", ascending=False),
+                display_df[["עיר", "כתובת/אזור", "סוג", "מחיר", "מ\"ר", "למ\"ר", "רווח %", "ביטחון", "אימות נתונים"]].sort_values("רווח %", ascending=False),
                 column_config={
                     "עיר": st.column_config.TextColumn(width="small"),
-                    "כתובת/אזור": st.column_config.TextColumn(width="large"), # העמודה הרחבה ביותר
+                    "כתובת/אזור": st.column_config.TextColumn(width="medium"),
                     "סוג": st.column_config.TextColumn(width="small"),
-                    "מחיר": st.column_config.NumberColumn(format="%d ₪", width="medium"),
+                    "מחיר": st.column_config.NumberColumn(format="%d ₪", width="small"),
                     "למ\"ר": st.column_config.NumberColumn(format="%d ₪", width="small"),
-                    "רווח %": st.column_config.ProgressColumn(format="%.1f%%", min_value=-10, max_value=40, width="medium"),
+                    "רווח %": st.column_config.ProgressColumn(format="%.1f%%", min_value=-10, max_value=40, width="small"),
                     "ביטחון": st.column_config.NumberColumn(format="%d%%", width="small"),
-                    "התחדשות": st.column_config.CheckboxColumn(width="small")
+                    "אימות נתונים": st.column_config.TextColumn(width="large", help="טקסט המקור")
                 },
-                use_container_width=True, # מתיחה לכל הרוחב
+                use_container_width=True,
                 hide_index=True,
                 height=700
             )
@@ -195,7 +172,7 @@ with tab2:
 
 with tab3:
     if st.button("🗑️ איפוס מאגר נתונים"):
-        conn = sqlite3.connect('smartyield_v11_clean.db')
+        conn = sqlite3.connect('smartyield_v13_logic.db')
         conn.execute("DELETE FROM listings")
         conn.commit()
         conn.close()
