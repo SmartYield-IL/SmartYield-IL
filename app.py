@@ -7,7 +7,6 @@ from datetime import datetime
 # --- 1. הגדרות תצוגה ועיצוב ---
 st.set_page_config(page_title="SmartYield Israel", layout="wide")
 
-# עיצוב בסיסי ונקי
 st.markdown("""
     <style>
     .stApp { background-color: #f8fafc; }
@@ -21,12 +20,10 @@ st.markdown("""
 def init_db():
     conn = sqlite3.connect('israel_invest.db')
     cursor = conn.cursor()
-    # יצירת טבלת נכסים
     cursor.execute('''CREATE TABLE IF NOT EXISTS listings 
                       (id INTEGER PRIMARY KEY, city TEXT, price INTEGER, sqm INTEGER, 
                        price_per_meter INTEGER, is_renewal INTEGER, timestamp TEXT)''')
     
-    # טבלת ייחוס ארצית (ממוצעי מ"ר 2026)
     city_data = [
         ("תל אביב", 65000), ("ירושלים", 42000), ("נתניה", 32000), 
         ("חיפה", 24000), ("באר שבע", 18000), ("חולון", 36000),
@@ -38,32 +35,44 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- 3. מנוע חילוץ נתונים ---
+# --- 3. מנוע חילוץ נתונים חכם (Smart Parser) ---
 def parse_and_store(text):
     conn = sqlite3.connect('israel_invest.db')
     cursor = conn.cursor()
+    
     keywords = ["פינוי בינוי", "תמא", "תמ״א", "התחדשות", "הריסה", "פוטנציאל"]
     cities = ["תל אביב", "ירושלים", "נתניה", "חיפה", "באר שבע", "חולון", "רמת גן", "גבעתיים", "אשדוד", "רעננה", "ראשון לציון"]
     
+    # פיצול לפי סימן השקל - כל חלק הוא מודעה פוטנציאלית
     raw_ads = text.split('₪')
     added_count = 0
+    
     for ad in raw_ads:
+        # 1. חילוץ מחיר (חייב להיות בין 5-8 ספרות)
         price_match = re.search(r'(\d[\d,]{5,8})', ad)
         if not price_match: continue
         price = int(price_match.group(1).replace(',', ''))
-        if price < 400000: continue
         
-        sqm_match = re.search(r'(\d{2,3})\s*(?:מ"ר|מר|מטר)', ad)
+        # סינון מחירים לא הגיוניים (מתחת ל-500 אלף או מעל 20 מיליון)
+        if price < 500000 or price > 20000000: continue
+        
+        # 2. חילוץ מ"ר (מחפש מספר שצמוד למילה מ"ר/מר/מטר)
+        sqm_match = re.search(r'(\d{2,3})\s*(?:מ"ר|מר|מטר|מ\"ר)', ad)
         sqm = int(sqm_match.group(1)) if sqm_match else 100
-        price_per_meter = price // sqm
         
-        city_detected = "אחר"
+        # 3. זיהוי עיר (רק אם העיר מופיעה בטקסט של המודעה הספציפית)
+        city_detected = None
         for c in cities:
             if c in ad:
                 city_detected = c
                 break
         
+        # אם לא זיהינו עיר, המודעה כנראה "זבל" מהכותרת - נדלג עליה
+        if not city_detected: continue
+        
+        price_per_meter = price // sqm
         is_renewal = 1 if any(word in ad for word in keywords) else 0
+        
         cursor.execute('''INSERT INTO listings (city, price, sqm, price_per_meter, is_renewal, timestamp) 
                           VALUES (?, ?, ?, ?, ?, ?)''', 
                        (city_detected, price, sqm, price_per_meter, is_renewal, datetime.now().strftime("%Y-%m-%d")))
@@ -78,22 +87,25 @@ init_db()
 
 with st.sidebar:
     st.header("📥 הזנת נתונים")
-    raw_input = st.text_area("הדבק נתונים גולמיים ממדלן/יד2:", height=300)
+    st.info("בצע Copy-Paste לכל עמוד המודעות (Cmd+A). המנוע יסנן את השאר לבד.")
+    raw_input = st.text_area("הדבק כאן:", height=300)
     if st.button("🚀 נתח נתונים"):
         if raw_input:
             count = parse_and_store(raw_input)
-            st.success(f"עובדו {count} נכסים בהצלחה")
-            st.rerun()
-    
-    if st.button("🗑️ איפוס מאגר"):
+            if count > 0:
+                st.success(f"נמצאו {count} מודעות תקינות!")
+                st.rerun()
+            else:
+                st.warning("לא נמצאו מודעות תקינות בטקסט שהודבק.")
+
+    if st.button("🗑️ ניקוי מאגר"):
         conn = sqlite3.connect('israel_invest.db')
         conn.execute("DELETE FROM listings")
         conn.commit()
         conn.close()
         st.rerun()
 
-# --- 5. הצגת נתונים וניתוח ---
-# הגנה מפני טבלה ריקה בשימוש ראשון
+# --- 5. דאשבורד ---
 try:
     conn = sqlite3.connect('israel_invest.db')
     query = '''
@@ -111,13 +123,12 @@ except:
     df = pd.DataFrame()
 
 if not df.empty:
-    # הצגת נתונים אם המאגר לא ריק
     c1, c2, c3 = st.columns(3)
     c1.metric("נכסים במערכת", len(df))
     c2.metric("רווח ממוצע", f"{df['פער רווח %'].mean():.1f}%")
     c3.metric("הזדמנות שיא", f"{df['פער רווח %'].max():.1f}%")
 
-    st.subheader("📋 עסקאות מאומתות")
+    st.subheader("📋 הזדמנויות בשוק")
     cities_sel = st.multiselect("סנן לפי ערים", df['עיר'].unique(), default=df['עיר'].unique())
     filtered = df[df['עיר'].isin(cities_sel)]
 
@@ -128,5 +139,4 @@ if not df.empty:
         use_container_width=True, hide_index=True
     )
 else:
-    # הודעה ידידותית בשימוש ראשון
-    st.info("👋 ברוך הבא ל-SmartYield! המערכת מוכנה לשימוש. אנא הדבק נתונים גולמיים בתפריט הצד כדי להתחיל בניתוח.")
+    st.info("👋 המערכת מוכנה. העתק עמוד ממדלן/יד2 והדבק בתפריט הצד.")
