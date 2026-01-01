@@ -3,14 +3,13 @@ import sqlite3
 import pandas as pd
 import re
 from datetime import datetime
-import styles  # <--- הייבוא של קובץ העיצוב החדש
+import styles
 
-# הפעלת העיצוב
 styles.apply_styles()
 
-# --- פונקציות ליבה ---
+# --- לוגיקה עסקית ---
 def init_db():
-    conn = sqlite3.connect('smartyield_pro.db')
+    conn = sqlite3.connect('smartyield_v3.db')
     cursor = conn.cursor()
     cursor.execute('''CREATE TABLE IF NOT EXISTS listings 
                       (id INTEGER PRIMARY KEY, city TEXT, type TEXT, price INTEGER, sqm INTEGER, 
@@ -26,7 +25,7 @@ def init_db():
     conn.commit() ; conn.close()
 
 def smart_parse(text):
-    conn = sqlite3.connect('smartyield_pro.db')
+    conn = sqlite3.connect('smartyield_v3.db')
     cursor = conn.cursor()
     cities = ["תל אביב", "ירושלים", "נתניה", "חיפה", "באר שבע", "רמת גן", "גבעתיים", "הרצליה", "ראשון לציון"]
     types = {"פנטהאוז": 1.35, "דירת גן": 1.25, "וילה": 1.50, "דו משפחתי": 1.40, "דירה": 1.0}
@@ -44,63 +43,78 @@ def smart_parse(text):
         if city and (600000 < price < 25000000):
             sqm_m = re.search(r'(\d{2,3})\s*(?:מ"ר|מר|מטר)', ad)
             sqm = int(sqm_m.group(1)) if sqm_m else 100
-            conf = 50 + (25 if sqm_m else 0) + (25 if len(ad) > 150 else 0)
+            conf = 60 + (20 if sqm_m else 0) + (20 if len(ad) > 150 else 0)
             cursor.execute("INSERT INTO listings (city, type, price, sqm, ppm, confidence, is_renewal, date) VALUES (?,?,?,?,?,?,?,?)",
                            (city, p_type, price, sqm, price // sqm, conf, 1 if "תמא" in ad or "פינוי" in ad else 0, datetime.now().strftime("%d/%m/%Y")))
             count += 1
     conn.commit() ; conn.close()
     return count
 
-# --- ממשק משתמש ---
 init_db()
 
-with st.sidebar:
-    st.markdown("### 📥 הזנת נתונים")
-    raw_input = st.text_area("הדבק נתונים גולמיים:", height=200)
-    if st.button("בצע ניתוח שוק"):
-        if raw_input:
-            c = smart_parse(raw_input)
-            st.success(f"נותחו {c} נכסים")
-            st.rerun()
+# --- ניווט לשוניות עליון ---
+tab1, tab2, tab3 = st.tabs(["🚀 ניתוח והזנת נתונים", "📈 מאגר הזדמנויות שוק", "ℹ️ אודות המערכת"])
+
+with tab1:
+    st.markdown("<div class='analysis-box'>", unsafe_allow_html=True)
+    st.subheader("📥 טרמינל הזרקת נתונים")
+    st.write("העתק עמוד מודעות מלא (מדלן/יד2) והדבק כאן למטה. המערכת תנתח סוגי נכס ופערי רווח אוטומטית.")
     
-    if st.button("🗑️ איפוס מאגר"):
-        conn = sqlite3.connect('smartyield_pro.db')
+    raw_input = st.text_area("תיבת הדבקה:", height=250, placeholder="הדבק כאן את הטקסט הגולמי...")
+    
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("🚀 הרץ ניתוח עומק"):
+            if raw_input:
+                c = smart_parse(raw_input)
+                st.success(f"נקלטו {c} נכסים!")
+                st.balloons()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with tab2:
+    try:
+        conn = sqlite3.connect('smartyield_v3.db')
+        df = pd.read_sql('''
+            SELECT l.city as "עיר", l.type as "סוג נכס", l.price as "מחיר", 
+                   l.sqm as "מ\"ר", l.ppm as "מחיר למ\"ר", l.confidence as "ביטחון",
+                   l.is_renewal as "התחדשות", b.avg_ppm as "ממוצע_עיר"
+            FROM listings l JOIN benchmarks b ON l.city = b.city
+        ''', conn)
+        df['פוטנציאל רווח'] = ((df['ממוצע_עיר'] - df['מחיר למ\"ר']) * 100.0 / df['ממוצע_עיר'])
+        conn.close()
+    except:
+        df = pd.DataFrame()
+
+    if not df.empty:
+        # מטריקות
+        c1, c2, c3 = st.columns(3)
+        c1.metric("נכסים שנותחו", len(df))
+        c2.metric("רווח פוטנציאלי ממוצע", f"{df['פוטנציאל רווח'].mean():.1f}%")
+        c3.metric("ציון ביטחון מערכת", f"{df['ביטחון'].mean():.0f}%")
+
+        st.dataframe(
+            df[["עיר", "סוג נכס", "מחיר", "מ\"ר", "מחיר למ\"ר", "פוטנציאל רווח", "ביטחון", "התחדשות"]].sort_values("פוטנציאל רווח", ascending=False),
+            column_config={
+                "מחיר": st.column_config.NumberColumn(format="%d ₪"),
+                "מחיר למ\"ר": st.column_config.NumberColumn(format="%d ₪"),
+                "פוטנציאל רווח": st.column_config.ProgressColumn(format="%.1f%%", min_value=-10, max_value=40),
+                "ביטחון": st.column_config.NumberColumn(format="%d%%")
+            },
+            use_container_width=True, hide_index=True
+        )
+    else:
+        st.info("המאגר ריק. אנא הזן נתונים בלשונית הניתוח.")
+
+with tab3:
+    st.subheader("על מערכת SmartYield")
+    st.write("""
+    SmartYield היא פלטפורמת בינה עסקית למשקיעי נדל"ן. 
+    המערכת סורקת נתונים גולמיים, מזהה סוגי נכסים (פנטהאוזים, דירות גן וכו') 
+    ומשווה אותם בזמן אמת למחירי הייחוס המעודכנים ביותר בשוק הישראלי לשנת 2026.
+    """)
+    st.divider()
+    if st.button("🗑️ ניקוי מוחלט של מאגר הנתונים"):
+        conn = sqlite3.connect('smartyield_v3.db')
         conn.execute("DELETE FROM listings")
         conn.commit() ; conn.close()
         st.rerun()
-
-# --- דאשבורד ---
-try:
-    conn = sqlite3.connect('smartyield_pro.db')
-    df = pd.read_sql('''
-        SELECT l.city as "עיר", l.type as "סוג נכס", l.price as "מחיר", 
-               l.sqm as "מ\"ר", l.ppm as "מחיר למ\"ר", l.confidence as "ביטחון",
-               l.is_renewal as "התחדשות", b.avg_ppm as "ממוצע_עיר"
-        FROM listings l JOIN benchmarks b ON l.city = b.city
-    ''', conn)
-    df['פוטנציאל רווח'] = ((df['ממוצע_עיר'] - df['מחיר למ\"ר']) * 100.0 / df['ממוצע_עיר'])
-    conn.close()
-except:
-    df = pd.DataFrame()
-
-if not df.empty:
-    c1, c2, c3 = st.columns(3)
-    c1.metric("נכסים שנותחו", len(df))
-    c2.metric("רווח ממוצע", f"{df['פוטנציאל רווח'].mean():.1f}%")
-    c3.metric("ציון ביטחון", f"{df['ביטחון'].mean():.0f}%")
-
-    st.markdown("---")
-    st.subheader("📋 הזדמנויות שאותרו")
-    st.dataframe(
-        df[["עיר", "סוג נכס", "מחיר", "מ\"ר", "מחיר למ\"ר", "פוטנציאל רווח", "ביטחון", "התחדשות"]].sort_values("פוטנציאל רווח", ascending=False),
-        column_config={
-            "מחיר": st.column_config.NumberColumn(format="%d ₪"),
-            "מחיר למ\"ר": st.column_config.NumberColumn(format="%d ₪"),
-            "פוטנציאל רווח": st.column_config.ProgressColumn(format="%.1f%%", min_value=-10, max_value=40),
-            "ביטחון": st.column_config.NumberColumn(format="%d%%"),
-            "התחדשות": st.column_config.CheckboxColumn()
-        },
-        use_container_width=True, hide_index=True
-    )
-else:
-    st.info("המערכת מוכנה. הדבק נתונים בסרגל הצד.")
