@@ -4,10 +4,10 @@ import pandas as pd
 import re
 from datetime import datetime
 
-# --- הגדרת עמוד בסיסית וחזקה ---
+# --- הגדרות עמוד ---
 st.set_page_config(page_title="SmartYield Pro", layout="wide")
 
-# CSS בסיסי ליישור לימין ורוחב מלא - בלי להסתיר אלמנטים
+# --- CSS ליישור לימין ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@300;400;700;800&display=swap');
@@ -16,22 +16,25 @@ st.markdown("""
         direction: rtl; 
         text-align: right; 
     }
-    /* הרחבת אזור העבודה למקסימום */
     .block-container { 
         padding-top: 1rem; 
-        padding-bottom: 5rem; 
         max-width: 100% !important;
     }
-    /* עיצוב כותרת */
-    h1 { color: #1e3a8a; }
 </style>
 """, unsafe_allow_html=True)
 
 # --- 1. מסד נתונים ---
 def init_db():
-    conn = sqlite3.connect('smartyield_v18_final.db')
+    conn = sqlite3.connect('smartyield_v19.db')
     cursor = conn.cursor()
-    cursor.execute("CREATE TABLE IF NOT EXISTS listings (id INTEGER PRIMARY KEY, city TEXT, type TEXT, rooms REAL, price INTEGER, sqm INTEGER, ppm INTEGER, confidence INTEGER, is_renewal INTEGER, address TEXT, original_text TEXT, date TEXT)")
+    
+    # פיצול פקודת יצירת הטבלה לשורות קצרות
+    sql_create = "CREATE TABLE IF NOT EXISTS listings ("
+    sql_create += "id INTEGER PRIMARY KEY, city TEXT, type TEXT, "
+    sql_create += "rooms REAL, price INTEGER, sqm INTEGER, ppm INTEGER, "
+    sql_create += "confidence INTEGER, is_renewal INTEGER, "
+    sql_create += "address TEXT, original_text TEXT, date TEXT)"
+    cursor.execute(sql_create)
     
     benchmarks = [
         ("תל אביב", 68000), ("ירושלים", 45000), ("נתניה", 33000), 
@@ -44,44 +47,178 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- מנוע ניקוי כתובת ---
-def extract_clean_address(text_segment):
-    blacklist = ["נגיש", "בקליק", "תפריט", "צור קשר", "whatsapp", "פייסבוק", "נדל\"ן", "טלפון", "משרד", "תיווך"]
-    street_match = re.search(r"(?:רחוב|רח'|שד'|שדרות|דרך|סמטת|שכונת)\s+([\u0590-\u05FF\"']+(?:\s+[\u0590-\u05FF\"']+)*\s*\d*)", text_segment)
-    if street_match:
-        address = street_match.group(0).strip()
-        if not any(bad in address for bad in blacklist): return address
-    clean_lines = [line.strip() for line in text_segment.split('\n') if 4 < len(line.strip()) < 40 and not any(bad in line for bad in blacklist)]
-    return clean_lines[0] if clean_lines else "אזור כללי"
+# --- פונקציות עזר קצרות ---
+def clean_address(text):
+    bad_words = ["נגיש", "תפריט", "צור קשר", "whatsapp", "פייסבוק", "נדל\"ן"]
+    # תבנית זיהוי רחוב מפוצלת
+    pat1 = r"(?:רחוב|רח'|שד'|שדרות|דרך|סמטת|שכונת)"
+    pat2 = r"\s+([\u0590-\u05FF\"']+(?:\s+[\u0590-\u05FF\"']+)*\s*\d*)"
+    match = re.search(pat1 + pat2, text)
+    
+    if match:
+        addr = match.group(0).strip()
+        if not any(b in addr for b in bad_words): return addr
+        
+    lines = text.split('\n')
+    for line in lines:
+        l = line.strip()
+        if 4 < len(l) < 40 and not any(b in l for b in bad_words):
+            return l
+    return "אזור כללי"
 
-# --- מנוע ניתוח (הלוגיקה שעבדה) ---
+def get_sqm(text, price, p_type):
+    # ניקוי רעשים
+    clean = re.sub(r'(?:מרחק|כ-|הליכה)\s*\d+\s*(?:מטר|מ"ר|מ\'|מ)', '', text)
+    
+    # תבנית זיהוי מ"ר
+    sqm_pattern = r'(\d{2,4})\s*(?:מ"ר|מר|מטר)'
+    matches = re.finditer(sqm_pattern, clean)
+    
+    for m in matches:
+        val = int(m.group(1))
+        
+        # חוקים
+        if p_type == "מגרש/קרקע": return val
+        if val > 350 and p_type == "דירה": continue
+        if (price / val) < 6000: continue
+        
+        return val
+    return 0
+
+# --- המנוע ---
 def smart_parse(text):
-    conn = sqlite3.connect('smartyield_v18_final.db')
+    conn = sqlite3.connect('smartyield_v19.db')
     cursor = conn.cursor()
-    cities = ["תל אביב", "ירושלים", "נתניה", "חיפה", "באר שבע", "רמת גן", "גבעתיים", 
-              "הרצליה", "ראשון לציון", "פתח תקווה", "חולון", "אשדוד"]
+    cities = ["תל אביב", "ירושלים", "נתניה", "חיפה", "באר שבע", "רמת גן", 
+              "גבעתיים", "הרצליה", "ראשון לציון", "פתח תקווה", "חולון", "אשדוד"]
     
     text = text.replace(',', '')
-    raw_ads = text.split('₪')
+    ads = text.split('₪')
     count = 0
     
-    for ad in raw_ads:
-        price_match = re.search(r'(\d{6,8})', ad)
-        if not price_match: continue
-        price = int(price_match.group(1))
+    for ad in ads:
+        # זיהוי מחיר
+        p_match = re.search(r'(\d{6,8})', ad)
+        if not p_match: continue
+        price = int(p_match.group(1))
         
-        city = next((c for c in cities if c in ad), None)
+        # זיהוי עיר
+        city = None
+        for c in cities:
+            if c in ad:
+                city = c
+                break
         
+        # זיהוי סוג
         p_type = "דירה"
         if "מגרש" in ad or "קרקע" in ad: p_type = "מגרש/קרקע"
-        elif "פנטהאוז" in ad or "גג" in ad: p_type = "פנטהאוז"
-        elif "דירת גן" in ad or "גן" in ad: p_type = "דירת גן"
-        elif "וילה" in ad or "פרטי" in ad or "קוטג" in ad: p_type = "וילה/בית פרטי"
+        elif "פנטהאוז" in ad: p_type = "פנטהאוז"
+        elif "דירת גן" in ad: p_type = "דירת גן"
+        elif "וילה" in ad: p_type = "וילה/בית פרטי"
         elif "דו משפחתי" in ad: p_type = "דו משפחתי"
         
-        rooms_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:חדרים|חד\b|חד\')', ad)
-        rooms = float(rooms_match.group(1)) if rooms_match else 0
+        # זיהוי חדרים
+        r_pattern = r'(\d+(?:\.\d+)?)\s*(?:חדרים|חד\b|חד\')'
+        r_match = re.search(r_pattern, ad)
+        rooms = float(r_match.group(1)) if r_match else 0
         
         if city and (600000 < price < 50000000):
-            clean_text = re.sub(r'(?:מרחק|כ-|הליכה)\s*\d+\s*(?:מטר|מ"ר|מ\'|מ)', '', ad)
-            sqm_matches = re.finditer(r'(\d{2,
+            # חילוץ מ"ר עם הפונקציה החדשה
+            sqm = get_sqm(ad, price, p_type)
+            
+            # חישובים
+            if sqm == 0:
+                sqm = 1
+                ppm = 0
+                conf = 10
+            else:
+                ppm = price // sqm
+                conf = 60
+                if rooms > 0: conf += 20
+            
+            is_ren = 1 if "תמא" in ad or "פינוי" in ad else 0
+            addr = clean_address(ad[:150])
+            proof = ad[:100].replace('\n', ' ')
+
+            # הכנסה למסד נתונים - בטוחה
+            sql = "INSERT INTO listings (city, type, rooms, price, sqm, ppm, "
+            sql += "confidence, is_renewal, address, original_text, date) "
+            sql += "VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+            
+            vals = (city, p_type, rooms, price, sqm, ppm, conf, is_ren, addr, proof, datetime.now().strftime("%d/%m/%Y"))
+            cursor.execute(sql, vals)
+            count += 1
+            
+    conn.commit()
+    conn.close()
+    return count
+
+init_db()
+
+# --- ממשק ---
+st.title("📊 SmartYield Pro")
+
+tab1, tab2, tab3 = st.tabs(["🚀 הדבקת נתונים", "📈 טבלת תוצאות", "⚙️ איפוס"])
+
+with tab1:
+    st.write("הדבק נתונים כאן:")
+    raw_input = st.text_area("input_area", height=300, label_visibility="collapsed")
+    if st.button("🚀 בצע ניתוח", type="primary"):
+        if raw_input:
+            c = smart_parse(raw_input)
+            st.success(f"נקלטו {c} נכסים")
+
+with tab2:
+    try:
+        conn = sqlite3.connect('smartyield_v19.db')
+        df = pd.read_sql("SELECT * FROM listings", conn)
+        bench = pd.read_sql("SELECT * FROM benchmarks", conn)
+        conn.close()
+
+        if not df.empty:
+            df = df.merge(bench, on='city', how='left')
+            
+            def calc_profit(row):
+                if row['type'] == "מגרש/קרקע": return 0
+                f = 1.0
+                if row['type'] == "פנטהאוז": f = 1.35
+                if row['type'] == "דירת גן": f = 1.25
+                if "וילה" in row['type']: f = 1.55
+                bench_p = row['avg_ppm'] * f
+                if row['sqm'] > 1 and row['ppm'] > 0:
+                    return ((bench_p - row['ppm']) * 100.0 / bench_p)
+                return 0
+
+            df['profit'] = df.apply(calc_profit, axis=1)
+            
+            # עמודות לתצוגה
+            cols = ["city", "address", "type", "rooms", "price", "sqm", "ppm", "profit", "confidence", "original_text"]
+            show_df = df[cols].sort_values("profit", ascending=False)
+            
+            # שינוי שמות
+            show_df.columns = ["עיר", "כתובת", "סוג", "חדרים", "מחיר", "מ\"ר", "למ\"ר", "רווח %", "ביטחון", "מקור"]
+
+            st.dataframe(
+                show_df,
+                column_config={
+                    "מחיר": st.column_config.NumberColumn(format="%d ₪"),
+                    "למ\"ר": st.column_config.NumberColumn(format="%d ₪"),
+                    "רווח %": st.column_config.ProgressColumn(format="%.1f%%", min_value=-10, max_value=40),
+                    "ביטחון": st.column_config.NumberColumn(format="%d%%"),
+                },
+                use_container_width=True,
+                hide_index=True,
+                height=700
+            )
+        else:
+            st.info("המאגר ריק.")
+    except Exception as e:
+        st.error(f"שגיאה: {e}")
+
+with tab3:
+    if st.button("🗑️ איפוס הכל"):
+        conn = sqlite3.connect('smartyield_v19.db')
+        conn.execute("DELETE FROM listings")
+        conn.commit()
+        conn.close()
+        st.rerun()
