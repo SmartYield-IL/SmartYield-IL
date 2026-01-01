@@ -8,13 +8,12 @@ import styles
 # הפעלת העיצוב
 styles.apply_styles()
 
-# --- 1. מסד נתונים ---
+# --- 1. הגדרת מסד הנתונים ---
 def init_db():
-    conn = sqlite3.connect('smartyield_v7_final.db')
+    conn = sqlite3.connect('smartyield_v8_stable.db')
     cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS listings 
-                      (id INTEGER PRIMARY KEY, city TEXT, type TEXT, price INTEGER, sqm INTEGER, 
-                       ppm INTEGER, confidence INTEGER, is_renewal INTEGER, date TEXT)''')
+    # יצירת טבלה בשורה אחת פשוטה למניעת שבירת שורות
+    cursor.execute("CREATE TABLE IF NOT EXISTS listings (id INTEGER PRIMARY KEY, city TEXT, type TEXT, price INTEGER, sqm INTEGER, ppm INTEGER, confidence INTEGER, is_renewal INTEGER, date TEXT)")
     
     benchmarks = [
         ("תל אביב", 68000), ("ירושלים", 45000), ("נתניה", 33000), 
@@ -22,19 +21,18 @@ def init_db():
         ("גבעתיים", 54000), ("הרצליה", 55000), ("ראשון לציון", 35000),
         ("פתח תקווה", 31000), ("חולון", 36000), ("אשדוד", 29000)
     ]
-    cursor.execute('CREATE TABLE IF NOT EXISTS benchmarks (city TEXT PRIMARY KEY, avg_ppm INTEGER)')
-    cursor.executemany('INSERT OR REPLACE INTO benchmarks VALUES (?, ?)', benchmarks)
+    cursor.execute("CREATE TABLE IF NOT EXISTS benchmarks (city TEXT PRIMARY KEY, avg_ppm INTEGER)")
+    cursor.executemany("INSERT OR REPLACE INTO benchmarks VALUES (?, ?)", benchmarks)
     conn.commit()
     conn.close()
 
-# --- 2. מנוע סריקה ---
+# --- 2. המנוע ---
 def smart_parse(text):
-    conn = sqlite3.connect('smartyield_v7_final.db')
+    conn = sqlite3.connect('smartyield_v8_stable.db')
     cursor = conn.cursor()
     cities = ["תל אביב", "ירושלים", "נתניה", "חיפה", "באר שבע", "רמת גן", "גבעתיים", 
               "הרצליה", "ראשון לציון", "פתח תקווה", "חולון", "אשדוד"]
     
-    # הגדרת סוגי נכס בצורה בטוחה
     text = text.replace(',', '')
     raw_ads = text.split('₪')
     count = 0
@@ -46,7 +44,7 @@ def smart_parse(text):
         
         city = next((c for c in cities if c in ad), None)
         
-        # זיהוי סוג נכס
+        # זיהוי סוג נכס בצורה פשוטה
         p_type = "דירה"
         if "פנטהאוז" in ad: p_type = "פנטהאוז"
         elif "דירת גן" in ad: p_type = "דירת גן"
@@ -57,8 +55,41 @@ def smart_parse(text):
             sqm_match = re.search(r'(\d{2,3})\s*(?:מ"ר|מר|מטר)', ad)
             sqm = int(sqm_match.group(1)) if sqm_match else 100
             
-            # חישוב מדד ביטחון
-            conf = 50 + (25 if sqm_match else 0) + (25 if len(ad) > 130 else 0)
-            is_ren = 1 if any(w in ad for w in ["תמא", "פינוי", "התחדשות"]) else 0
+            # חישוב ביטחון
+            conf = 50
+            if sqm_match: conf += 25
+            if len(ad) > 130: conf += 25
             
-            cursor.execute("""INSERT INTO listings (city, type, price, sqm, ppm, confidence, is_
+            is_ren = 0
+            if "תמא" in ad or "פינוי" in ad or "התחדשות" in ad: is_ren = 1
+            
+            # שאילתת SQL פשוטה ונקייה
+            sql = "INSERT INTO listings (city, type, price, sqm, ppm, confidence, is_renewal, date) VALUES (?,?,?,?,?,?,?,?)"
+            val = (city, p_type, price, sqm, price // sqm, conf, is_ren, datetime.now().strftime("%d/%m/%Y"))
+            cursor.execute(sql, val)
+            count += 1
+            
+    conn.commit()
+    conn.close()
+    return count
+
+init_db()
+
+# --- 3. ממשק ---
+tab1, tab2, tab3 = st.tabs(["🚀 ניתוח נכסים", "📊 מאגר הזדמנויות", "⚙️ ניהול"])
+
+with tab1:
+    st.markdown("<div class='analysis-box'>", unsafe_allow_html=True)
+    st.subheader("הזנת נתונים")
+    raw_input = st.text_area("הדבק עמוד מודעות מלא:", height=250)
+    if st.button("בצע ניתוח שוק"):
+        if raw_input:
+            c = smart_parse(raw_input)
+            st.success(f"הניתוח הושלם. {c} נכסים התווספו למאגר.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with tab2:
+    try:
+        conn = sqlite3.connect('smartyield_v8_stable.db')
+        df = pd.read_sql("SELECT * FROM listings", conn)
+        bench_df = pd.read_sql("SELECT * FROM benchmarks", conn
