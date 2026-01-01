@@ -4,20 +4,20 @@ import pandas as pd
 import re
 from datetime import datetime
 
-# --- 1. קונפיגורציה ועיצוב פרימיום ---
+# --- 1. הגדרות תצוגה ועיצוב ---
 st.set_page_config(page_title="SmartYield Israel", layout="wide")
 
+# עיצוב בסיסי ונקי
 st.markdown("""
     <style>
     .stApp { background-color: #f8fafc; }
     .main-header { color: #1e3a8a; font-size: 36px; font-weight: 800; text-align: center; margin-bottom: 25px; direction: rtl; }
     .stMetric { border-right: 5px solid #b8860b; background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    div[data-testid="stDataFrame"] { background: white; border-radius: 12px; }
     </style>
-    <div class="main-header">📊 SmartYield Israel | המערכת החכמה לניתוח נדל״ן</div>
+    <div class="main-header">📊 SmartYield Israel | ניתוח עסקאות נדל״ן</div>
     """, unsafe_allow_html=True)
 
-# --- 2. ניהול בסיס נתונים ---
+# --- 2. ניהול בסיס הנתונים ---
 def init_db():
     conn = sqlite3.connect('israel_invest.db')
     cursor = conn.cursor()
@@ -38,7 +38,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- 3. מנוע חילוץ נתונים (Parser) ---
+# --- 3. מנוע חילוץ נתונים ---
 def parse_and_store(text):
     conn = sqlite3.connect('israel_invest.db')
     cursor = conn.cursor()
@@ -77,23 +77,23 @@ def parse_and_store(text):
 init_db()
 
 with st.sidebar:
-    st.header("📥 הזנת נתונים ארצית")
-    raw_input = st.text_area("הדבק נתונים גולמיים (מדלן/יד2):", height=300)
-    if st.button("🚀 נתח והזרק למחסן"):
+    st.header("📥 הזנת נתונים")
+    raw_input = st.text_area("הדבק נתונים גולמיים ממדלן/יד2:", height=300)
+    if st.button("🚀 נתח נתונים"):
         if raw_input:
             count = parse_and_store(raw_input)
-            st.success(f"עובדו {count} נכסים")
+            st.success(f"עובדו {count} נכסים בהצלחה")
             st.rerun()
     
-    st.divider()
-    if st.button("🗑️ ניקוי מחסן נתונים"):
+    if st.button("🗑️ איפוס מאגר"):
         conn = sqlite3.connect('israel_invest.db')
         conn.execute("DELETE FROM listings")
         conn.commit()
         conn.close()
         st.rerun()
 
-# --- 5. הצגת נתונים וניתוח (מנגנון מוגן משגיאות) ---
+# --- 5. הצגת נתונים וניתוח ---
+# הגנה מפני טבלה ריקה בשימוש ראשון
 try:
     conn = sqlite3.connect('israel_invest.db')
     query = '''
@@ -107,38 +107,26 @@ try:
     '''
     df = pd.read_sql(query, conn)
     conn.close()
-except Exception:
+except:
     df = pd.DataFrame()
 
 if not df.empty:
-    # מטריקות עליונות
+    # הצגת נתונים אם המאגר לא ריק
     c1, c2, c3 = st.columns(3)
     c1.metric("נכסים במערכת", len(df))
-    c2.metric("ממוצע רווח על הנייר", f"{df['פער רווח %'].mean():.1f}%")
-    c3.metric("הזדמנות מקסימלית", f"{df['פער רווח %'].max():.1f}%")
+    c2.metric("רווח ממוצע", f"{df['פער רווח %'].mean():.1f}%")
+    c3.metric("הזדמנות שיא", f"{df['פער רווח %'].max():.1f}%")
 
-    st.subheader("📋 הזדמנויות השקעה שאותרו")
-    
-    # סינונים
-    f1, f2 = st.columns([2, 1])
-    with f1:
-        cities_sel = st.multiselect("סנן לפי ערים", df['עיר'].unique(), default=df['עיר'].unique())
-    with f2:
-        only_renewal = st.checkbox("הצג רק פינוי בינוי")
-
+    st.subheader("📋 עסקאות מאומתות")
+    cities_sel = st.multiselect("סנן לפי ערים", df['עיר'].unique(), default=df['עיר'].unique())
     filtered = df[df['עיר'].isin(cities_sel)]
-    if only_renewal: filtered = filtered[filtered['פינוי בינוי'] == 1]
 
-    # טבלה מעוצבת
     st.dataframe(
         filtered.sort_values("פער רווח %", ascending=False).style.format({
             "מחיר": "{:,.0f} ₪", "מחיר למ\"ר": "{:,.0f} ₪", "ממוצע עיר": "{:,.0f} ₪", "פער רווח %": "{:.1f}%"
         }).background_gradient(subset=['פער רווח %'], cmap='RdYlGn'),
         use_container_width=True, hide_index=True
     )
-    
-    # גרף
-    st.subheader("📈 פיזור מחירים למ\"ר מול ממוצע עירוני")
-    st.scatter_chart(filtered, x="מחיר למ\"ר", y="ממוצע עיר", color="עיר")
 else:
-    st.info("👋 ברוכים הבאים ל-SmartYield! המערכת מוכנה. כרגע אין נתונים במחסן. הדבק נתונים בתפריט הצד כדי להתחיל בניתוח.")
+    # הודעה ידידותית בשימוש ראשון
+    st.info("👋 ברוך הבא ל-SmartYield! המערכת מוכנה לשימוש. אנא הדבק נתונים גולמיים בתפריט הצד כדי להתחיל בניתוח.")
