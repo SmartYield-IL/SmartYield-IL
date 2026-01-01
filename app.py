@@ -4,10 +4,9 @@ import pandas as pd
 import re
 from datetime import datetime
 
-# --- קונפיגורציה פרימיום ---
-st.set_page_config(page_title="Israel Real Estate Intelligence", layout="wide")
+# --- 1. קונפיגורציה ועיצוב פרימיום ---
+st.set_page_config(page_title="SmartYield Israel", layout="wide")
 
-# עיצוב CSS מתקדם (תיקון השגיאה כאן: unsafe_allow_html)
 st.markdown("""
     <style>
     .stApp { background-color: #f8fafc; }
@@ -15,18 +14,19 @@ st.markdown("""
     .stMetric { border-right: 5px solid #b8860b; background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     div[data-testid="stDataFrame"] { background: white; border-radius: 12px; }
     </style>
-    <div class="main-header">🏛️ ISRAEL INVEST | מדד הנדל״ן הארצי 2026</div>
+    <div class="main-header">📊 SmartYield Israel | המערכת החכמה לניתוח נדל״ן</div>
     """, unsafe_allow_html=True)
 
-# --- ניהול בסיס נתונים ---
+# --- 2. ניהול בסיס נתונים ---
 def init_db():
     conn = sqlite3.connect('israel_invest.db')
     cursor = conn.cursor()
+    # יצירת טבלת נכסים
     cursor.execute('''CREATE TABLE IF NOT EXISTS listings 
                       (id INTEGER PRIMARY KEY, city TEXT, price INTEGER, sqm INTEGER, 
                        price_per_meter INTEGER, is_renewal INTEGER, timestamp TEXT)''')
     
-    # נתוני ייחוס ארצית (ממוצעי מ"ר 2026)
+    # טבלת ייחוס ארצית (ממוצעי מ"ר 2026)
     city_data = [
         ("תל אביב", 65000), ("ירושלים", 42000), ("נתניה", 32000), 
         ("חיפה", 24000), ("באר שבע", 18000), ("חולון", 36000),
@@ -38,6 +38,7 @@ def init_db():
     conn.commit()
     conn.close()
 
+# --- 3. מנוע חילוץ נתונים (Parser) ---
 def parse_and_store(text):
     conn = sqlite3.connect('israel_invest.db')
     cursor = conn.cursor()
@@ -72,7 +73,7 @@ def parse_and_store(text):
     conn.close()
     return added_count
 
-# --- בניית הממשק ---
+# --- 4. ממשק המשתמש ---
 init_db()
 
 with st.sidebar:
@@ -85,46 +86,50 @@ with st.sidebar:
             st.rerun()
     
     st.divider()
-    if st.button("🗑️ ניקוי מחסן"):
+    if st.button("🗑️ ניקוי מחסן נתונים"):
         conn = sqlite3.connect('israel_invest.db')
         conn.execute("DELETE FROM listings")
         conn.commit()
         conn.close()
         st.rerun()
 
-# --- דאשבורד ניתוח ---
-conn = sqlite3.connect('israel_invest.db')
-query = '''
-    SELECT l.city as עיר, l.price as מחיר, l.sqm as "מ\"ר", 
-           l.price_per_meter as "מחיר למ\"ר", 
-           b.avg_sqm_price as "ממוצע עיר",
-           ((b.avg_sqm_price - l.price_per_meter) * 100.0 / b.avg_sqm_price) as "פער רווח %",
-           l.is_renewal as "פינוי בינוי"
-    FROM listings l
-    JOIN city_benchmarks b ON l.city = b.city
-'''
-df = pd.read_sql(query, conn)
-conn.close()
+# --- 5. הצגת נתונים וניתוח (מנגנון מוגן משגיאות) ---
+try:
+    conn = sqlite3.connect('israel_invest.db')
+    query = '''
+        SELECT l.city as עיר, l.price as מחיר, l.sqm as "מ\"ר", 
+               l.price_per_meter as "מחיר למ\"ר", 
+               b.avg_sqm_price as "ממוצע עיר",
+               ((b.avg_sqm_price - l.price_per_meter) * 100.0 / b.avg_sqm_price) as "פער רווח %",
+               l.is_renewal as "פינוי בינוי"
+        FROM listings l
+        JOIN city_benchmarks b ON l.city = b.city
+    '''
+    df = pd.read_sql(query, conn)
+    conn.close()
+except Exception:
+    df = pd.DataFrame()
 
 if not df.empty:
-    # מדדים עליונים
+    # מטריקות עליונות
     c1, c2, c3 = st.columns(3)
     c1.metric("נכסים במערכת", len(df))
     c2.metric("ממוצע רווח על הנייר", f"{df['פער רווח %'].mean():.1f}%")
-    c3.metric("הזדמנות זהב", f"{df['פער רווח %'].max():.1f}%")
+    c3.metric("הזדמנות מקסימלית", f"{df['פער רווח %'].max():.1f}%")
 
-    st.subheader("📋 עסקאות מאומתות")
+    st.subheader("📋 הזדמנויות השקעה שאותרו")
     
-    # סינונים חכמים
+    # סינונים
     f1, f2 = st.columns([2, 1])
     with f1:
-        cities_sel = st.multiselect("בחר ערים", df['עיר'].unique(), default=df['עיר'].unique())
+        cities_sel = st.multiselect("סנן לפי ערים", df['עיר'].unique(), default=df['עיר'].unique())
     with f2:
-        only_renewal = st.checkbox("רק פוטנציאל פינוי בינוי")
+        only_renewal = st.checkbox("הצג רק פינוי בינוי")
 
     filtered = df[df['עיר'].isin(cities_sel)]
     if only_renewal: filtered = filtered[filtered['פינוי בינוי'] == 1]
 
+    # טבלה מעוצבת
     st.dataframe(
         filtered.sort_values("פער רווח %", ascending=False).style.format({
             "מחיר": "{:,.0f} ₪", "מחיר למ\"ר": "{:,.0f} ₪", "ממוצע עיר": "{:,.0f} ₪", "פער רווח %": "{:.1f}%"
@@ -132,7 +137,8 @@ if not df.empty:
         use_container_width=True, hide_index=True
     )
     
-    st.subheader("📈 השוואת מחיר למ\"ר מול ממוצע עירוני")
+    # גרף
+    st.subheader("📈 פיזור מחירים למ\"ר מול ממוצע עירוני")
     st.scatter_chart(filtered, x="מחיר למ\"ר", y="ממוצע עיר", color="עיר")
 else:
-    st.info("המערכת ממתינה להזנת נתונים. בצע העתק-הדבק מהלוח בתפריט הצד.")
+    st.info("👋 ברוכים הבאים ל-SmartYield! המערכת מוכנה. כרגע אין נתונים במחסן. הדבק נתונים בתפריט הצד כדי להתחיל בניתוח.")
