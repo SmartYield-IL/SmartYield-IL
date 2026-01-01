@@ -8,13 +8,14 @@ import styles
 # הפעלת העיצוב
 styles.apply_styles()
 
-# --- 1. הגדרת מסד הנתונים ---
+# --- 1. מסד נתונים ---
 def init_db():
-    conn = sqlite3.connect('smartyield_v8_stable.db')
+    conn = sqlite3.connect('smartyield_v9_fixed.db')
     cursor = conn.cursor()
-    # יצירת טבלה בשורה אחת פשוטה למניעת שבירת שורות
+    # יצירת טבלה ראשית
     cursor.execute("CREATE TABLE IF NOT EXISTS listings (id INTEGER PRIMARY KEY, city TEXT, type TEXT, price INTEGER, sqm INTEGER, ppm INTEGER, confidence INTEGER, is_renewal INTEGER, date TEXT)")
     
+    # טבלת בנצ'מרק
     benchmarks = [
         ("תל אביב", 68000), ("ירושלים", 45000), ("נתניה", 33000), 
         ("חיפה", 25000), ("באר שבע", 19000), ("רמת גן", 50000),
@@ -26,9 +27,9 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- 2. המנוע ---
+# --- 2. מנוע סריקה ---
 def smart_parse(text):
-    conn = sqlite3.connect('smartyield_v8_stable.db')
+    conn = sqlite3.connect('smartyield_v9_fixed.db')
     cursor = conn.cursor()
     cities = ["תל אביב", "ירושלים", "נתניה", "חיפה", "באר שבע", "רמת גן", "גבעתיים", 
               "הרצליה", "ראשון לציון", "פתח תקווה", "חולון", "אשדוד"]
@@ -44,7 +45,6 @@ def smart_parse(text):
         
         city = next((c for c in cities if c in ad), None)
         
-        # זיהוי סוג נכס בצורה פשוטה
         p_type = "דירה"
         if "פנטהאוז" in ad: p_type = "פנטהאוז"
         elif "דירת גן" in ad: p_type = "דירת גן"
@@ -55,7 +55,6 @@ def smart_parse(text):
             sqm_match = re.search(r'(\d{2,3})\s*(?:מ"ר|מר|מטר)', ad)
             sqm = int(sqm_match.group(1)) if sqm_match else 100
             
-            # חישוב ביטחון
             conf = 50
             if sqm_match: conf += 25
             if len(ad) > 130: conf += 25
@@ -63,7 +62,6 @@ def smart_parse(text):
             is_ren = 0
             if "תמא" in ad or "פינוי" in ad or "התחדשות" in ad: is_ren = 1
             
-            # שאילתת SQL פשוטה ונקייה
             sql = "INSERT INTO listings (city, type, price, sqm, ppm, confidence, is_renewal, date) VALUES (?,?,?,?,?,?,?,?)"
             val = (city, p_type, price, sqm, price // sqm, conf, is_ren, datetime.now().strftime("%d/%m/%Y"))
             cursor.execute(sql, val)
@@ -90,6 +88,55 @@ with tab1:
 
 with tab2:
     try:
-        conn = sqlite3.connect('smartyield_v8_stable.db')
+        conn = sqlite3.connect('smartyield_v9_fixed.db')
         df = pd.read_sql("SELECT * FROM listings", conn)
-        bench_df = pd.read_sql("SELECT * FROM benchmarks", conn
+        bench_df = pd.read_sql("SELECT * FROM benchmarks", conn)
+        conn.close()
+
+        if not df.empty:
+            df = df.merge(bench_df, on='city', how='left')
+            
+            def get_factor(t):
+                if t == "פנטהאוז": return 1.35
+                if t == "דירת גן": return 1.25
+                if t == "וילה": return 1.55
+                return 1.0
+
+            df['factor'] = df['type'].apply(get_factor)
+            df['adj_bench'] = df['avg_ppm'] * df['factor']
+            df['profit'] = ((df['adj_bench'] - df['ppm']) * 100.0 / df['adj_bench'])
+            
+            display_df = df.rename(columns={
+                "city": "עיר", "type": "סוג נכס", "price": "מחיר", 
+                "sqm": "מ\"ר", "ppm": "מחיר למ\"ר", "profit": "פוטנציאל רווח", 
+                "confidence": "ביטחון", "is_renewal": "התחדשות"
+            })
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("נכסים", len(df))
+            c2.metric("רווח ממוצע", f"{df['profit'].mean():.1f}%")
+            c3.metric("ביטחון", f"{df['confidence'].mean():.0f}%")
+
+            st.dataframe(
+                display_df[["עיר", "סוג נכס", "מחיר", "מ\"ר", "מחיר למ\"ר", "פוטנציאל רווח", "ביטחון", "התחדשות"]].sort_values("פוטנציאל רווח", ascending=False),
+                column_config={
+                    "מחיר": st.column_config.NumberColumn(format="%d ₪"),
+                    "מחיר למ\"ר": st.column_config.NumberColumn(format="%d ₪"),
+                    "פוטנציאל רווח": st.column_config.ProgressColumn(format="%.1f%%", min_value=-10, max_value=40),
+                    "ביטחון": st.column_config.NumberColumn(format="%d%%"),
+                    "התחדשות": st.column_config.CheckboxColumn()
+                },
+                use_container_width=True, hide_index=True
+            )
+        else:
+            st.info("המאגר ריק.")
+    except Exception as e:
+        st.error(f"שגיאה: {e}")
+
+with tab3:
+    if st.button("🗑️ איפוס מאגר נתונים"):
+        conn = sqlite3.connect('smartyield_v9_fixed.db')
+        conn.execute("DELETE FROM listings")
+        conn.commit()
+        conn.close()
+        st.rerun()
