@@ -6,221 +6,251 @@ import re
 from datetime import datetime
 
 # --- הגדרת עמוד ---
-st.set_page_config(page_title="SmartYield Ultimate", layout="wide")
+st.set_page_config(page_title="SmartYield Pro", layout="wide")
 
-# --- CSS מקצועי ---
+# --- CSS עיצוב ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@400;700;800&display=swap');
     html, body, .stApp { font-family: 'Assistant', sans-serif; direction: rtl; text-align: right; }
-    .block-container { padding-top: 2rem; max-width: 95% !important; }
+    .block-container { padding-top: 1rem; max-width: 100% !important; }
     
-    /* עיצוב כרטיסי דראג-אנד-דרופ */
-    .stFileUploader { text-align: center; }
-    div[data-testid="stFileUploader"] section { background-color: #f8f9fa; border: 2px dashed #1e3a8a; }
+    /* עיצוב כרטיסי תוצאות */
+    div[data-testid="stMetric"] {
+        background-color: #f0f9ff;
+        border: 1px solid #bae6fd;
+        padding: 15px;
+        border-radius: 10px;
+        text-align: center;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # --- 1. מסד נתונים ---
 def init_db():
-    conn = sqlite3.connect('smartyield_pro_source.db')
+    conn = sqlite3.connect('smartyield_v23_complete.db')
     cursor = conn.cursor()
-    # מבנה טבלה מדויק
     cursor.execute("""CREATE TABLE IF NOT EXISTS listings (
         id INTEGER PRIMARY KEY, city TEXT, street TEXT, type TEXT, 
         rooms REAL, floor INTEGER, price INTEGER, sqm INTEGER, ppm INTEGER, 
         profit REAL, confidence INTEGER, date TEXT
     )""")
     
-    # בנצ'מרק
+    # בנצ'מרק מעודכן (מחיר ממוצע למ"ר)
     benchmarks = [
         ("תל אביב", 68000), ("ירושלים", 45000), ("נתניה", 33000), 
         ("חיפה", 25000), ("באר שבע", 19000), ("רמת גן", 50000),
         ("גבעתיים", 54000), ("הרצליה", 55000), ("ראשון לציון", 35000),
-        ("פתח תקווה", 31000), ("חולון", 36000), ("אשדוד", 29000)
+        ("פתח תקווה", 31000), ("חולון", 36000), ("אשדוד", 29000),
+        ("בת ים", 34000), ("רעננה", 46000), ("כפר סבא", 38000)
     ]
     cursor.execute("CREATE TABLE IF NOT EXISTS benchmarks (city TEXT PRIMARY KEY, avg_ppm INTEGER)")
     cursor.executemany("INSERT OR REPLACE INTO benchmarks VALUES (?, ?)", benchmarks)
     conn.commit()
     conn.close()
 
-# --- המוח: מפרק קוד HTML (לא טקסט!) ---
+# --- לוגיקה עסקית ---
+def calculate_deal(city, price, sqm, p_type):
+    if sqm == 0: return 0, 0, 0
+    
+    ppm = price / sqm
+    
+    conn = sqlite3.connect('smartyield_v23_complete.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT avg_ppm FROM benchmarks WHERE city=?", (city,))
+    res = cursor.fetchone()
+    conn.close()
+    
+    if not res: return ppm, 0, 0 # עיר לא מוכרת
+    
+    avg_market = res[0]
+    
+    # התאמת מחיר השוק לסוג הנכס
+    factor = 1.0
+    if p_type == "פנטהאוז": factor = 1.35
+    if p_type == "דירת גן": factor = 1.25
+    if p_type == "בית פרטי": factor = 1.4
+    if p_type == "מרתף/מחסן": factor = 0.6
+    
+    target_price_ppm = avg_market * factor
+    fair_value = target_price_ppm * sqm
+    
+    # אחוז הרווח (ההפרש בין השווי ההוגן למחיר המבוקש)
+    profit_percent = ((fair_value - price) / fair_value) * 100
+    
+    return ppm, profit_percent, fair_value
+
+# --- מוח: ניתוח HTML ---
 def parse_html_file(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
     listings = []
     
-    # זיהוי "כרטיסי" מודעות לפי מבנה נפוץ של אתרי נדל"ן (יד2/מדלן)
-    # אסטרטגיה: חיפוש אלמנטים שמכילים מחיר, ואז חפירה פנימה
-    
-    # ננסה לתפוס את כל הבלוקים שיכולים להיות מודעה
-    # ביד2 זה בדרך כלל feeditem, במדלן זה bullet
+    # ניסיון לתפוס כרטיסים גנריים
     potential_cards = soup.find_all(['div', 'li'], class_=re.compile(r'(feed_item|card|listing|bullet)', re.IGNORECASE))
     
     for card in potential_cards:
         try:
-            text_blob = card.get_text(" ", strip=True) # המרת הכרטיס לטקסט נקי עם רווחים
+            text_blob = card.get_text(" ", strip=True)
             
-            # --- שליפת מחיר מדויקת ---
-            # מחפש אלמנט שיש בו סימן שקל או מחיר
+            # מחיר
             price = 0
             price_match = re.search(r'(\d{1,3}(?:,\d{3})*)\s*₪?', text_blob)
             if price_match:
-                price_str = price_match.group(1).replace(',', '')
-                if price_str.isdigit():
-                    price = int(price_str)
+                p_str = price_match.group(1).replace(',', '')
+                if p_str.isdigit(): price = int(p_str)
             
-            if not (600000 < price < 50000000): continue # סינון מחירים לא הגיוניים
+            if not (600000 < price < 50000000): continue
 
-            # --- שליפת עיר ורחוב ---
+            # עיר
             city = "כללי"
             street = "לא צוין"
-            cities_list = ["תל אביב", "ירושלים", "נתניה", "חיפה", "באר שבע", "רמת גן", "גבעתיים", "הרצליה", "ראשון לציון", "פתח תקווה", "חולון", "אשדוד"]
+            cities_list = ["תל אביב", "ירושלים", "נתניה", "חיפה", "באר שבע", "רמת גן", "גבעתיים", "הרצליה", "ראשון לציון", "פתח תקווה", "חולון", "אשדוד", "רעננה", "כפר סבא"]
             
             for c in cities_list:
                 if c in text_blob:
                     city = c
-                    # ניסיון לחלץ רחוב מהטקסט שצמוד לעיר
                     parts = text_blob.split(c)
                     if len(parts) > 0:
-                        prev_words = parts[0].split()[-4:] # 4 מילים אחרונות לפני העיר
-                        street = " ".join(prev_words).replace("רחוב", "").replace("ב", "").strip()
+                        prev = parts[0].split()[-4:]
+                        street = " ".join(prev).replace("רחוב", "").strip()
                     break
 
-            # --- שליפת חדרים ---
+            # פרטים טכניים
             rooms = 0
-            # ב-HTML המספר לרוב יושב באלמנט נפרד ליד המילה "חדרים"
-            rooms_match = re.search(r'(\d+(?:\.\d+)?)\s*חד', text_blob)
-            if rooms_match:
-                rooms = float(rooms_match.group(1))
+            r_match = re.search(r'(\d+(?:\.\d+)?)\s*חד', text_blob)
+            if r_match: rooms = float(r_match.group(1))
 
-            # --- שליפת קומה (מדויק!) ---
             floor = 0
-            floor_match = re.search(r'קומה\s*(\d+)', text_blob)
-            if floor_match:
-                floor = int(floor_match.group(1))
-                if floor > 50: floor = 0 # הגנה משגיאות
+            f_match = re.search(r'קומה\s*(\d+)', text_blob)
+            if f_match: floor = int(f_match.group(1))
 
-            # --- שליפת מ"ר ---
             sqm = 0
-            # כאן היתרון של HTML - המ"ר לרוב מופרד
-            sqm_matches = re.finditer(r'(\d{2,4})\s*(?:מ"ר|מר|מטר)', text_blob)
-            for m in sqm_matches:
+            s_matches = re.finditer(r'(\d{2,4})\s*(?:מ"ר|מר|מטר)', text_blob)
+            for m in s_matches:
                 val = int(m.group(1))
-                if 30 < val < 500: # טווח הגיוני
-                    # בדיקה שהמספר הוא לא המחיר בטעות
-                    if price / val > 4000: 
-                        sqm = val
-                        break
+                if 30 < val < 500 and (price/val > 4000):
+                    sqm = val
+                    break
 
-            # --- חישוב רווח ---
-            ppm = 0
-            profit = 0
-            if sqm > 0 and price > 0:
-                ppm = price // sqm
-                conn = sqlite3.connect('smartyield_pro_source.db')
-                cur = conn.cursor()
-                cur.execute("SELECT avg_ppm FROM benchmarks WHERE city=?", (city,))
-                res = cur.fetchone()
-                conn.close()
-                
-                if res:
-                    avg = res[0]
-                    # פקטור פנטהאוז
-                    factor = 1.0
-                    if "פנטהאוז" in text_blob: factor = 1.35
-                    if "גן" in text_blob: factor = 1.25
-                    
-                    target = avg * factor
-                    profit = ((target - ppm) / target) * 100
-
-            # שמירה
-            listings.append((city, street, "דירה", rooms, floor, price, sqm, ppm, profit, 90, datetime.now().strftime("%d/%m/%Y")))
+            # חישוב רווח
+            p_type = "דירה"
+            if "פנטהאוז" in text_blob: p_type = "פנטהאוז"
+            if "גן" in text_blob: p_type = "דירת גן"
             
-        except Exception as e:
-            continue # אם כרטיס אחד נכשל, ממשיכים לאחרים
+            ppm, profit, fair_val = calculate_deal(city, price, sqm, p_type)
+
+            if sqm > 0:
+                listings.append((city, street, p_type, rooms, floor, price, sqm, ppm, profit, 90, datetime.now().strftime("%d/%m/%Y")))
+            
+        except: continue
 
     return listings
 
 def save_to_db(listings):
     if not listings: return 0
-    conn = sqlite3.connect('smartyield_pro_source.db')
+    conn = sqlite3.connect('smartyield_v23_complete.db')
     cursor = conn.cursor()
-    count = 0
+    c = 0
     for l in listings:
         cursor.execute("INSERT INTO listings (city, street, type, rooms, floor, price, sqm, ppm, profit, confidence, date) VALUES (?,?,?,?,?,?,?,?,?,?,?)", l)
-        count += 1
+        c += 1
     conn.commit()
     conn.close()
-    return count
+    return c
 
 init_db()
 
-# --- ממשק המשתמש ---
-st.title("🏙️ SmartYield Pro - מנתח קבצי מקור")
-st.markdown("### המערכת המקצועית לניתוח דפי נדל\"ן ללא שגיאות טקסט")
+# --- ממשק משתמש ---
+st.title("🏡 SmartYield - מערכת קבלת החלטות בנדל\"ן")
 
-tab1, tab2 = st.tabs(["📂 טעינת קובץ נתונים", "📊 דשבורד עסקאות"])
+# בחירת מצב עבודה
+mode = st.radio("בחר כיצד תרצה לעבוד:", 
+         ["מחשבון עסקה בודדת (מהיר)", "סריקת שוק המונית (מקצועי)"], 
+         horizontal=True)
 
-with tab1:
-    col1, col2 = st.columns([2, 1])
+st.divider()
+
+# --- מצב 1: מחשבון מהיר לאדם הפשוט ---
+if mode == "מחשבון עסקה בודדת (מהיר)":
+    st.subheader("בדיקת כדאיות מיידית")
+    st.write("ראית דירה? הזן את הפרטים וקבל ניתוח שוק מיידי.")
+    
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.info("💡 **איך עובדים כמו מקצוענים?**\n1. כנס לאתר (יד2 / מדלן).\n2. לחץ `Ctrl + S` ושמור את הדף במחשב.\n3. גרור את הקובץ לכאן.")
+        city_input = st.selectbox("עיר", ["נתניה", "תל אביב", "חיפה", "ירושלים", "באר שבע", "רמת גן", "גבעתיים", "הרצליה", "ראשון לציון", "פתח תקווה", "חולון", "אשדוד", "כפר סבא", "רעננה"])
+    with col2:
+        type_input = st.selectbox("סוג נכס", ["דירה", "פנטהאוז", "דירת גן", "בית פרטי"])
+    with col3:
+        sqm_input = st.number_input("מ\"ר בנוי", min_value=30, max_value=500, value=100)
+    with col4:
+        price_input = st.number_input("מחיר מבוקש (₪)", min_value=500000, step=50000, value=2000000)
         
-        uploaded_file = st.file_uploader("גרור לכאן את קובץ ה-HTML ששמרת", type=['html', 'htm'])
+    if st.button("📊 נתח עסקה", type="primary", use_container_width=True):
+        ppm, profit, fair_val = calculate_deal(city_input, price_input, sqm_input, type_input)
         
-        if uploaded_file is not None:
-            with st.spinner('מפרק את קוד האתר לגורמים...'):
-                html_content = uploaded_file.read().decode("utf-8")
-                listings = parse_html_file(html_content)
-                count = save_to_db(listings)
-                
-            if count > 0:
-                st.success(f"✅ הצלחנו! חולצו {count} נכסים מדויקים מתוך הקוד.")
-                st.balloons()
-            else:
-                st.warning("לא נמצאו נכסים בקובץ. וודא ששמרת דף עם תוצאות חיפוש.")
+        st.markdown("---")
+        
+        # תוצאות ויזואליות
+        m1, m2, m3 = st.columns(3)
+        m1.metric("מחיר למ\"ר שלך", f"{int(ppm):,} ₪")
+        
+        # צבע לרווח
+        profit_color = "normal"
+        if profit > 5: profit_color = "off" # ירוק בהיפוך של סטרימליט או פשוט נשתמש בטקסט
+        
+        delta_color = "normal"
+        if profit > 0: delta_color = "inverse" # חיובי = ירוק
+        elif profit < 0: delta_color = "off" # שלילי = אדום
+            
+        m2.metric("פער ממחיר השוק", f"{profit:.1f}%", delta=f"{profit:.1f}%", delta_color=delta_color)
+        m3.metric("שווי הוגן מוערך", f"{int(fair_val):,} ₪")
+        
+        if profit > 10:
+            st.success("🔥 **עסקה לוהטת!** הנכס מתומחר משמעותית מתחת למחיר השוק.")
+        elif profit > 0:
+            st.info("✅ **עסקה טובה.** המחיר הוגן ואטרקטיבי.")
+        elif profit > -10:
+            st.warning("⚠️ **מחיר שוק.** אין כאן הנחה מיוחדת.")
+        else:
+            st.error("🛑 **יקר מדי!** המחיר גבוה משמעותית מהממוצע באזור.")
 
-with tab2:
-    conn = sqlite3.connect('smartyield_pro_source.db')
-    try:
-        df = pd.read_sql("SELECT * FROM listings ORDER BY profit DESC", conn)
+# --- מצב 2: סורק קבצים למקצוענים ---
+elif mode == "סריקת שוק המונית (מקצועי)":
+    st.subheader("ניתוח דפי תוצאות (יד2 / מדלן)")
+    
+    tab_scan, tab_results = st.tabs(["📂 טעינת קובץ", "📈 טבלת הזדמנויות"])
+    
+    with tab_scan:
+        st.info("כדי לסרוק עשרות דירות בבת אחת: שמור את דף התוצאות במחשב (Ctrl+S) וגרור לכאן.")
+        uploaded = st.file_uploader("גרור קובץ HTML", type=['html', 'htm'])
+        if uploaded:
+            with st.spinner('מנתח נתונים...'):
+                html = uploaded.read().decode("utf-8")
+                lst = parse_html_file(html)
+                cnt = save_to_db(lst)
+            if cnt: st.success(f"נקלטו {cnt} דירות!")
+            else: st.error("לא נמצאו נתונים בקובץ.")
+
+    with tab_results:
+        conn = sqlite3.connect('smartyield_v23_complete.db')
+        try:
+            df = pd.read_sql("SELECT * FROM listings ORDER BY profit DESC", conn)
+            if not df.empty:
+                st.dataframe(
+                    df[["city", "street", "type", "rooms", "floor", "sqm", "price", "ppm", "profit"]],
+                    column_config={
+                        "city": "עיר", "street": "רחוב", "type": "סוג", 
+                        "rooms": "חדרים", "floor": "קומה", "sqm": "מ\"ר",
+                        "price": st.column_config.NumberColumn("מחיר", format="%d ₪"),
+                        "ppm": st.column_config.NumberColumn("למ\"ר", format="%d ₪"),
+                        "profit": st.column_config.ProgressColumn("רווח %", format="%.1f%%", min_value=-20, max_value=40)
+                    }, use_container_width=True, hide_index=True, height=600
+                )
+            else: st.info("המאגר ריק.")
+        except: st.write("אין נתונים.")
         conn.close()
         
-        if not df.empty:
-            # מטריקות
-            m1, m2, m3 = st.columns(3)
-            m1.metric("נכסים במאגר", len(df))
-            m2.metric("רווח ממוצע", f"{df['profit'].mean():.1f}%")
-            m3.metric("עיר מובילה", df['city'].mode()[0])
-            
-            st.divider()
-            
-            st.dataframe(
-                df[["city", "street", "rooms", "floor", "sqm", "price", "ppm", "profit"]],
-                column_config={
-                    "city": "עיר",
-                    "street": st.column_config.TextColumn("רחוב", width="medium"),
-                    "rooms": st.column_config.NumberColumn("חד'", format="%.1f"),
-                    "floor": st.column_config.NumberColumn("קומה", format="%d"),
-                    "sqm": st.column_config.NumberColumn("מ\"ר", format="%d"),
-                    "price": st.column_config.NumberColumn("מחיר", format="%d ₪"),
-                    "ppm": st.column_config.NumberColumn("למ\"ר", format="%d ₪"),
-                    "profit": st.column_config.ProgressColumn("פוטנציאל רווח", format="%.1f%%", min_value=-15, max_value=45),
-                },
-                use_container_width=True,
-                hide_index=True,
-                height=600
-            )
-        else:
-            st.info("המאגר ריק. טען קובץ HTML בלשונית הראשונה.")
-    except:
-        st.write("אין נתונים.")
-
-# כפתור ניקוי בצד
-with st.sidebar:
-    if st.button("🗑️ איפוס מלא"):
-        c = sqlite3.connect('smartyield_pro_source.db')
-        c.execute("DELETE FROM listings")
-        c.commit()
-        c.close()
+    if st.button("נקה מאגר"):
+        c = sqlite3.connect('smartyield_v23_complete.db')
+        c.execute("DELETE FROM listings") ; c.commit() ; c.close()
         st.rerun()
