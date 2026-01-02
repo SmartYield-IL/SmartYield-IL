@@ -1,255 +1,136 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
-from bs4 import BeautifulSoup
-import re
-from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import time
+import random
 
 # --- הגדרת עמוד ---
-st.set_page_config(page_title="SmartYield Pro", layout="wide")
+st.set_page_config(page_title="Auto-Scraper Pro", layout="wide")
 
 # --- CSS ---
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@400;700;800&display=swap');
-    html, body, .stApp { font-family: 'Assistant', sans-serif; direction: rtl; text-align: right; }
-    .block-container { padding-top: 1rem; max-width: 100% !important; }
-    div[data-testid="stMetric"] { background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; }
+    body { direction: rtl; text-align: right; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+    .stButton>button { width: 100%; border-radius: 10px; height: 3em; font-weight: bold; }
+    div[data-testid="stMetric"] { background-color: #f0f2f6; border-radius: 10px; padding: 10px; text-align: center; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- מוח גיאוגרפי: מפת היוקרה של ישראל ---
-# המערכת מחפשת את המילים האלו בכתובת. אם מוצאת, היא מכפילה את שווי השוק בפקטור.
-# בסיס (1.0) = הממוצע של העיר.
-ZONE_MULTIPLIERS = {
-    "נתניה": {
-        "עיר ימים": 1.6, "פולג": 1.45, "רמת פולג": 1.45, "אגמים": 1.25, "ניצה": 1.3, # יוקרה
-        "קרית השרון": 1.15, "מרכז העיר": 1.0, # בינוני
-        "דורה": 0.75, "רמת ידין": 0.75, "סלע": 0.8, "נאות שקד": 0.85 # זול
-    },
-    "תל אביב": {
-        "נווה צדק": 1.8, "רמת אביב": 1.5, "הצפון הישן": 1.4, "לב העיר": 1.4, "שרונה": 1.5, # יוקרה
-        "פלורנטין": 1.1, "יד אליהו": 0.95, # בינוני
-        "התקווה": 0.7, "נווה שאנן": 0.65, "יפו ד": 0.7 # זול
-    },
-    "חיפה": {
-        "דניה": 1.6, "כרמל": 1.4, "מרכז הכרמל": 1.35, "אחוזה": 1.25, # יוקרה
-        "נווה שאנן": 1.0, "רמות רמז": 1.0, # בינוני
-        "הדר": 0.7, "העיר התחתית": 0.8, "נווה דוד": 0.75 # זול
-    },
-    "הרצליה": {
-        "הרצליה פיתוח": 2.2, "הירוקה": 1.2,
-        "מרכז": 1.0, "יד התשעה": 0.8
-    }
-}
-
-# --- 1. מסד נתונים ---
-def init_db():
-    conn = sqlite3.connect('smartyield_v24_zones.db')
-    cursor = conn.cursor()
-    cursor.execute("""CREATE TABLE IF NOT EXISTS listings (
-        id INTEGER PRIMARY KEY, city TEXT, street TEXT, type TEXT, 
-        rooms REAL, floor INTEGER, price INTEGER, sqm INTEGER, ppm INTEGER, 
-        profit REAL, zone_factor REAL, confidence INTEGER, date TEXT
-    )""")
+# --- פונקציית הרובוט (הליבה) ---
+def run_scraper(city_url, max_items=20):
+    status_text = st.empty()
+    progress_bar = st.progress(0)
     
-    # בנצ'מרק בסיס (מחיר ממוצע לעיר ללא שכונות יוקרה)
-    benchmarks = [
-        ("תל אביב", 55000), # הבסיס ירד כי הפרדנו את היוקרה
-        ("ירושלים", 38000), 
-        ("נתניה", 27000),   # בסיס נתניה (ללא עיר ימים)
-        ("חיפה", 21000),    # בסיס חיפה (ללא דניה)
-        ("באר שבע", 16000), ("רמת גן", 42000),
-        ("גבעתיים", 48000), ("הרצליה", 45000), ("ראשון לציון", 29000),
-        ("פתח תקווה", 28000), ("חולון", 32000), ("אשדוד", 26000),
-        ("בת ים", 31000), ("רעננה", 41000), ("כפר סבא", 34000)
-    ]
-    cursor.execute("CREATE TABLE IF NOT EXISTS benchmarks (city TEXT PRIMARY KEY, avg_ppm INTEGER)")
-    cursor.executemany("INSERT OR REPLACE INTO benchmarks VALUES (?, ?)", benchmarks)
-    conn.commit()
-    conn.close()
-
-# --- לוגיקה חכמה ---
-def calculate_smart_value(city, address_text, price, sqm, p_type):
-    if sqm == 0: return 0, 0, 0, 1.0, "לא זוהה"
+    status_text.info("🚀 מפעיל מנוע דפדפן (Headless Chrome)...")
     
-    ppm = price / sqm
+    # הגדרות דפדפן (כדי להיראות כמו בן אדם ולא כמו בוט)
+    options = Options()
+    options.add_argument("--headless") # רץ ברקע בלי לפתוח חלון
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
     
-    conn = sqlite3.connect('smartyield_v24_zones.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT avg_ppm FROM benchmarks WHERE city=?", (city,))
-    res = cursor.fetchone()
-    conn.close()
+    driver = webdriver.Chrome(options=options)
+    data = []
     
-    if not res: return ppm, 0, 0, 1.0, "עיר לא נתמכת"
-    
-    base_market_price = res[0]
-    zone_factor = 1.0
-    zone_name = "אזור רגיל"
-    
-    # 1. בדיקת שכונה (התיקון הגדול)
-    if city in ZONE_MULTIPLIERS:
-        # מחפש כל שכונה ברשימה בתוך הטקסט של הכתובת
-        for neighborhood, factor in ZONE_MULTIPLIERS[city].items():
-            if neighborhood in address_text:
-                zone_factor = factor
-                zone_name = neighborhood
-                break # מצאנו שכונה, עוצרים
-    
-    # 2. בדיקת סוג נכס
-    type_factor = 1.0
-    if p_type == "פנטהאוז": type_factor = 1.3
-    if p_type == "דירת גן": type_factor = 1.15
-    if p_type == "בית פרטי": type_factor = 1.4
-    
-    # חישוב שווי הוגן משוקלל
-    final_target_ppm = base_market_price * zone_factor * type_factor
-    fair_value = final_target_ppm * sqm
-    
-    profit_percent = ((fair_value - price) / fair_value) * 100
-    
-    return ppm, profit_percent, fair_value, zone_factor, zone_name
-
-# --- מוח: ניתוח HTML ---
-def parse_html_file(html_content):
-    soup = BeautifulSoup(html_content, 'html.parser')
-    listings = []
-    potential_cards = soup.find_all(['div', 'li'], class_=re.compile(r'(feed_item|card|listing|bullet)', re.IGNORECASE))
-    
-    for card in potential_cards:
-        try:
-            text_blob = card.get_text(" ", strip=True)
+    try:
+        status_text.info(f"🌐 גולש לכתובת: {city_url}...")
+        driver.get(city_url)
+        
+        # המתנה לטעינת האתר (חשוב מאוד ביד2!)
+        time.sleep(5) 
+        
+        status_text.info("👀 סורק את העמוד ומחפש דירות...")
+        
+        # גלילה למטה כדי לטעון עוד נתונים (Infinite Scroll)
+        for i in range(3):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+        
+        # ניסיון לאתר את קופסאות המודעות (Feed Items)
+        # הערה: יד2 משנים את ה-Class ID כל הזמן. אנחנו ננסה לתפוס אלמנטים גנריים.
+        # אסטרטגיה: חיפוש אלמנטים שמכילים מחיר
+        
+        # שיטה גנרית: תופסים את כל הטקסט ומפרקים אותו
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        
+        # פירוק הטקסט הגולמי מהדפדפן (דומה למה שעשינו עם HTML, אבל הפעם הדפדפן הביא אותו לבד)
+        raw_listings = body_text.split('\n')
+        
+        current_listing = {}
+        counter = 0
+        
+        # לוגיקה פשוטה לזיהוי רצף נתונים מהמסך
+        # זה לא מושלם כמו API, אבל זה עוקף חסימות כי זה קורא מהמסך
+        for line in raw_listings:
+            if "₪" in line and len(line) < 20: # זיהוי מחיר
+                price_clean = ''.join(filter(str.isdigit, line))
+                if price_clean and int(price_clean) > 500000:
+                    current_listing['price'] = int(price_clean)
             
-            # חילוץ מחיר
-            price = 0
-            price_match = re.search(r'(\d{1,3}(?:,\d{3})*)\s*₪?', text_blob)
-            if price_match:
-                p_str = price_match.group(1).replace(',', '')
-                if p_str.isdigit(): price = int(p_str)
+            elif "חדרים" in line: # זיהוי חדרים
+                rooms_clean = line.replace("חדרים", "").replace("-", "").strip()
+                try: current_listing['rooms'] = float(rooms_clean)
+                except: pass
             
-            if not (600000 < price < 50000000): continue
-
-            # עיר ורחוב
-            city = "כללי"
-            street = text_blob # כברירת מחדל כל הטקסט הוא הכתובת לבדיקת שכונה
-            cities_list = list(ZONE_MULTIPLIERS.keys()) + ["באר שבע", "רמת גן", "גבעתיים", "ראשון לציון", "פתח תקווה", "חולון", "אשדוד", "רעננה", "כפר סבא", "ירושלים"]
+            elif 'מ"ר' in line or 'מ"ר' in line: # זיהוי מ"ר
+                sqm_clean = ''.join(filter(str.isdigit, line))
+                if sqm_clean: current_listing['sqm'] = int(sqm_clean)
             
-            for c in cities_list:
-                if c in text_blob:
-                    city = c
-                    # מנסים לחלץ רחוב נקי לתצוגה
-                    parts = text_blob.split(c)
-                    if len(parts) > 0:
-                        street = parts[0][-50:] # לוקחים הקשר סביב העיר
-                    break
-
-            # חדרים וקומה
-            rooms = 0
-            r_match = re.search(r'(\d+(?:\.\d+)?)\s*חד', text_blob)
-            if r_match: rooms = float(r_match.group(1))
-
-            floor = 0
-            f_match = re.search(r'קומה\s*(\d+)', text_blob)
-            if f_match: floor = int(f_match.group(1))
-
-            # מ"ר
-            sqm = 0
-            s_matches = re.finditer(r'(\d{2,4})\s*(?:מ"ר|מר|מטר)', text_blob)
-            for m in s_matches:
-                val = int(m.group(1))
-                if 30 < val < 500 and (price/val > 4000):
-                    sqm = val
-                    break
-
-            # סוג
-            p_type = "דירה"
-            if "פנטהאוז" in text_blob: p_type = "פנטהאוז"
-            if "גן" in text_blob: p_type = "דירת גן"
-            if "וילה" in text_blob or "פרטי" in text_blob: p_type = "בית פרטי"
-
-            # חישוב חכם
-            if sqm > 0:
-                ppm, profit, fair_val, z_factor, z_name = calculate_smart_value(city, street, price, sqm, p_type)
-                listings.append((city, z_name, p_type, rooms, floor, price, sqm, ppm, profit, z_factor, datetime.now().strftime("%d/%m/%Y")))
-            
-        except: continue
-    return listings
-
-def save_to_db(listings):
-    if not listings: return 0
-    conn = sqlite3.connect('smartyield_v24_zones.db')
-    cursor = conn.cursor()
-    c = 0
-    for l in listings:
-        cursor.execute("INSERT INTO listings (city, street, type, rooms, floor, price, sqm, ppm, profit, zone_factor, date) VALUES (?,?,?,?,?,?,?,?,?,?,?)", l)
-        c += 1
-    conn.commit()
-    conn.close()
-    return c
-
-init_db()
+            # אם אספנו מספיק מידע לרשומה, נשמור אותה
+            if 'price' in current_listing and 'rooms' in current_listing:
+                current_listing['city'] = "תוצאת סריקה" # אפשר לשפר זיהוי עיר
+                data.append(current_listing)
+                current_listing = {} # איפוס
+                counter += 1
+                progress_bar.progress(min(counter / max_items, 1.0))
+        
+        status_text.success(f"✅ הסריקה הסתיימה! נמצאו {len(data)} נכסים.")
+        
+    except Exception as e:
+        status_text.error(f"שגיאה בסריקה: {str(e)}")
+    finally:
+        driver.quit() # סגירת הדפדפן
+        
+    return data
 
 # --- ממשק משתמש ---
-st.title("🏙️ SmartYield - מערכת נדל\"ן מבוססת מיקום")
+st.title("🤖 הבוט האוטונומי")
+st.write("מערכת סריקה אקטיבית. הבוט ייכנס לאתר במקומך ויביא את הנתונים.")
 
-mode = st.radio("", ["מחשבון עסקה (מהיר)", "סריקת קבצים (מקצועי)"], horizontal=True)
-st.divider()
+# בחירת אזור לסריקה (הכתובות האלו הן דוגמאות לחיפושים ביד2)
+URLS = {
+    "נתניה - כל העיר": "https://www.yad2.co.il/realestate/forsale?city=7400",
+    "תל אביב - 3-4 חדרים": "https://www.yad2.co.il/realestate/forsale?city=5000&rooms=3-4",
+    "חיפה - עד 2 מיליון": "https://www.yad2.co.il/realestate/forsale?city=4000&price=-1-2000000"
+}
 
-if mode == "מחשבון עסקה (מהיר)":
-    col1, col2 = st.columns(2)
-    with col1:
-        city_in = st.selectbox("עיר", list(ZONE_MULTIPLIERS.keys()) + ["ערים נוספות..."])
-        street_in = st.text_input("רחוב / שכונה (חשוב לדיוק!)", placeholder="למשל: עיר ימים / דורה / הדר")
-    with col2:
-        sqm_in = st.number_input("מ\"ר", 30, 500, 100)
-        price_in = st.number_input("מחיר", 500000, 50000000, 2000000, step=50000)
-        type_in = st.selectbox("סוג", ["דירה", "פנטהאוז", "דירת גן", "בית פרטי"])
+target_search = st.selectbox("בחר אזור לסריקה:", list(URLS.keys()))
 
-    if st.button("בצע הערכת שווי", type="primary", use_container_width=True):
-        ppm, profit, fair_val, z_factor, z_name = calculate_smart_value(city_in, street_in, price_in, sqm_in, type_in)
-        
-        # תצוגת זיהוי שכונה
-        if z_factor > 1.0:
-            st.success(f"💎 **זוהה אזור יוקרה:** {z_name} (שווי שוק הותאם ב- {int((z_factor-1)*100)}% למעלה)")
-        elif z_factor < 1.0:
-            st.info(f"📉 **זוהה אזור מוזל:** {z_name} (שווי שוק הותאם בהתאם)")
-        else:
-            st.warning("📍 **אזור רגיל / לא זוהה:** החישוב מתבסס על ממוצע עירוני כללי.")
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("מחיר למ\"ר מחושב", f"{int(ppm):,} ₪")
-        c2.metric("פער משווי הוגן", f"{profit:.1f}%", delta_color="normal" if profit > 0 else "off")
-        c3.metric("שווי הוגן (מותאם שכונה)", f"{int(fair_val):,} ₪")
-
-elif mode == "סריקת קבצים (מקצועי)":
-    tab_scan, tab_res = st.tabs(["טעינה", "תוצאות"])
-    with tab_scan:
-        st.info("שמור דף מיד2 (Ctrl+S) וגרור לכאן.")
-        up = st.file_uploader("HTML File", type=['html', 'htm'])
-        if up:
-            with st.spinner('מנתח שכונות ומחירים...'):
-                raw = up.read().decode("utf-8")
-                res = parse_html_file(raw)
-                cnt = save_to_db(res)
-            if cnt: st.success(f"נקלטו {cnt} נכסים")
+if st.button("🚀 הפעל את הרובוט", type="primary"):
+    target_url = URLS[target_search]
+    results = run_scraper(target_url)
     
-    with tab_res:
-        conn = sqlite3.connect('smartyield_v24_zones.db')
-        try:
-            df = pd.read_sql("SELECT * FROM listings ORDER BY profit DESC", conn)
-            if not df.empty:
-                st.dataframe(
-                    df[["city", "street", "type", "rooms", "sqm", "price", "ppm", "profit"]],
-                    column_config={
-                        "street": "אזור/שכונה",
-                        "price": st.column_config.NumberColumn(format="%d ₪"),
-                        "profit": st.column_config.ProgressColumn("רווח %", format="%.1f%%", min_value=-20, max_value=40)
-                    }, use_container_width=True, hide_index=True
-                )
-            else: st.info("ריק")
-        except: pass
-        conn.close()
+    if results:
+        df = pd.DataFrame(results)
         
-    if st.button("איפוס"):
-        c = sqlite3.connect('smartyield_v24_zones.db')
-        c.execute("DELETE FROM listings") ; c.commit() ; c.close() ; st.rerun()
+        # חישובים בסיסיים
+        if 'sqm' in df.columns and 'price' in df.columns:
+            df['ppm'] = df.apply(lambda x: x['price'] / x['sqm'] if x.get('sqm') else 0, axis=1)
+        
+        # הצגת נתונים
+        st.divider()
+        col1, col2 = st.columns(2)
+        col1.metric("נכסים שנסרקו", len(df))
+        if 'price' in df.columns:
+            col2.metric("מחיר ממוצע", f"{int(df['price'].mean()):,} ₪")
+        
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.warning("הבוט סיים לרוץ אך לא הצליח לחלץ נתונים. ייתכן שיד2 חסמו את הגישה או שינו את המבנה.")
+        st.info("טיפ: אתרי נדל\"ן חוסמים שרתים בענן. הפתרון היחיד שעובד ב-100% הוא להריץ את זה מהמחשב האישי שלך.")
