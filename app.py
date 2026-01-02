@@ -3,134 +3,189 @@ import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 import time
 import random
 
 # --- הגדרת עמוד ---
-st.set_page_config(page_title="Auto-Scraper Pro", layout="wide")
+st.set_page_config(page_title="Real Estate Hunter V25", layout="wide")
 
-# --- CSS ---
+# --- CSS מקצועי ---
 st.markdown("""
 <style>
-    body { direction: rtl; text-align: right; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-    .stButton>button { width: 100%; border-radius: 10px; height: 3em; font-weight: bold; }
-    div[data-testid="stMetric"] { background-color: #f0f2f6; border-radius: 10px; padding: 10px; text-align: center; }
+    body { direction: rtl; text-align: right; font-family: 'Segoe UI', sans-serif; }
+    div[data-testid="stMetric"] { background-color: #f8f9fa; border-radius: 8px; padding: 10px; border: 1px solid #dee2e6; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- פונקציית הרובוט (הליבה) ---
-def run_scraper(city_url, max_items=20):
-    status_text = st.empty()
-    progress_bar = st.progress(0)
-    
-    status_text.info("🚀 מפעיל מנוע דפדפן (Headless Chrome)...")
-    
-    # הגדרות דפדפן (כדי להיראות כמו בן אדם ולא כמו בוט)
+# --- קונפיגורציה לסטארטאפ (כאן תכניס פרוקסי בעתיד) ---
+PROXY_SERVER = None # דוגמה: "http://user:pass@gate.smartproxy.com:7000"
+
+def get_driver():
     options = Options()
-    options.add_argument("--headless") # רץ ברקע בלי לפתוח חלון
+    options.add_argument("--headless") # רץ ברקע
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+    # התחזות לדפדפן רגיל לחלוטין
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+    options.add_argument("--window-size=1920,1080")
     
-    driver = webdriver.Chrome(options=options)
+    if PROXY_SERVER:
+        options.add_argument(f'--proxy-server={PROXY_SERVER}')
+        
+    return webdriver.Chrome(options=options)
+
+def extract_yad2_data(driver, url):
     data = []
+    status = st.empty()
+    bar = st.progress(0)
     
-    try:
-        status_text.info(f"🌐 גולש לכתובת: {city_url}...")
-        driver.get(city_url)
-        
-        # המתנה לטעינת האתר (חשוב מאוד ביד2!)
-        time.sleep(5) 
-        
-        status_text.info("👀 סורק את העמוד ומחפש דירות...")
-        
-        # גלילה למטה כדי לטעון עוד נתונים (Infinite Scroll)
-        for i in range(3):
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)
-        
-        # ניסיון לאתר את קופסאות המודעות (Feed Items)
-        # הערה: יד2 משנים את ה-Class ID כל הזמן. אנחנו ננסה לתפוס אלמנטים גנריים.
-        # אסטרטגיה: חיפוש אלמנטים שמכילים מחיר
-        
-        # שיטה גנרית: תופסים את כל הטקסט ומפרקים אותו
-        body_text = driver.find_element(By.TAG_NAME, "body").text
-        
-        # פירוק הטקסט הגולמי מהדפדפן (דומה למה שעשינו עם HTML, אבל הפעם הדפדפן הביא אותו לבד)
-        raw_listings = body_text.split('\n')
-        
-        current_listing = {}
-        counter = 0
-        
-        # לוגיקה פשוטה לזיהוי רצף נתונים מהמסך
-        # זה לא מושלם כמו API, אבל זה עוקף חסימות כי זה קורא מהמסך
-        for line in raw_listings:
-            if "₪" in line and len(line) < 20: # זיהוי מחיר
-                price_clean = ''.join(filter(str.isdigit, line))
-                if price_clean and int(price_clean) > 500000:
-                    current_listing['price'] = int(price_clean)
+    status.info("🕵️ מתחבר לאתר ומנסה לעקוף הגנות...")
+    driver.get(url)
+    
+    # השהייה רנדומלית וגלילה מדורגת (חיקוי אנושי)
+    for i in range(1, 6):
+        driver.execute_script(f"window.scrollTo(0, document.body.scrollHeight * {i/5});")
+        time.sleep(random.uniform(1.5, 3.0))
+        bar.progress(i * 10)
+
+    status.info("extraction... שואב נתונים...")
+    
+    # זיהוי כל הכרטיסים בעמוד (Feed Items)
+    # אנו משתמשים ב-Selectors גנריים כי יד2 משנים שמות של קלאסים
+    # אבל המבנה של "feeditem" נשאר יחסית קבוע
+    items = driver.find_elements(By.XPATH, "//div[contains(@class, 'feeditem') or contains(@class, 'feed_item')]")
+    
+    if not items:
+        # ניסיון שני - אולי המבנה שונה
+        items = driver.find_elements(By.CLASS_NAME, "feed-item-base")
+
+    total = len(items)
+    status.write(f"מצאתי {total} מודעות פוטנציאליות. מתחיל עיבוד...")
+    
+    for idx, item in enumerate(items):
+        try:
+            # אובייקט זמני
+            listing = {
+                "address": "לא צוין",
+                "price": 0,
+                "rooms": 0,
+                "sqm": 0,
+                "floor": 0,
+                "link": "#"
+            }
             
-            elif "חדרים" in line: # זיהוי חדרים
-                rooms_clean = line.replace("חדרים", "").replace("-", "").strip()
-                try: current_listing['rooms'] = float(rooms_clean)
-                except: pass
+            # 1. חילוץ קישור (Link) - הכי חשוב!
+            try:
+                # מחפש תגית 'a' בתוך הכרטיס
+                link_elem = item.find_element(By.TAG_NAME, "a")
+                href = link_elem.get_attribute("href")
+                if href and "yad2" in href:
+                    listing["link"] = href
+            except: pass
+
+            # 2. חילוץ מחיר
+            try:
+                text_content = item.text
+                import re
+                price_match = re.search(r'(\d{1,3}(?:,\d{3})*)\s*₪', text_content)
+                if price_match:
+                    p = price_match.group(1).replace(',', '')
+                    listing["price"] = int(p)
+            except: pass
             
-            elif 'מ"ר' in line or 'מ"ר' in line: # זיהוי מ"ר
-                sqm_clean = ''.join(filter(str.isdigit, line))
-                if sqm_clean: current_listing['sqm'] = int(sqm_clean)
+            # אם אין מחיר, מדלגים (לא מעניין)
+            if listing["price"] < 100000: continue
+
+            # 3. חילוץ כתובת (נמצאת לרוב בכותרת המשנית)
+            try:
+                # מנסה למצוא את האלמנט של הכתובת לפי מיקום יחסי או קלאס נפוץ
+                subtitle = item.find_element(By.CLASS_NAME, "subtitle").text
+                listing["address"] = subtitle
+            except:
+                # Fallback: מנסה לחלץ מהטקסט הכללי
+                lines = item.text.split('\n')
+                for line in lines:
+                    if "רחוב" in line or "דרך" in line or "שכונה" in line:
+                        listing["address"] = line
+                        break
+
+            # 4. חילוץ נתונים טכניים (חדרים, מ"ר, קומה)
+            # יד2 שמים את זה בקוביות קטנות. ננסה לחלץ מהטקסט המלא בצורה חכמה
+            full_text = item.text.replace('\n', ' ')
             
-            # אם אספנו מספיק מידע לרשומה, נשמור אותה
-            if 'price' in current_listing and 'rooms' in current_listing:
-                current_listing['city'] = "תוצאת סריקה" # אפשר לשפר זיהוי עיר
-                data.append(current_listing)
-                current_listing = {} # איפוס
-                counter += 1
-                progress_bar.progress(min(counter / max_items, 1.0))
-        
-        status_text.success(f"✅ הסריקה הסתיימה! נמצאו {len(data)} נכסים.")
-        
-    except Exception as e:
-        status_text.error(f"שגיאה בסריקה: {str(e)}")
-    finally:
-        driver.quit() # סגירת הדפדפן
-        
+            # חדרים
+            r_match = re.search(r'(\d+(?:\.\d+)?)\s*חד', full_text)
+            if r_match: listing["rooms"] = float(r_match.group(1))
+            
+            # מ"ר
+            s_matches = re.finditer(r'(\d{2,4})\s*(?:מ"ר|מר|מטר)', full_text)
+            for m in s_matches:
+                val = int(m.group(1))
+                if val > 30 and (listing["price"] / val > 4000): # סינון רעשים
+                    listing["sqm"] = val
+                    break
+            
+            # קומה
+            f_match = re.search(r'קומה\s*(\d+)', full_text)
+            if f_match: listing["floor"] = int(f_match.group(1))
+
+            data.append(listing)
+            
+        except Exception as e:
+            continue # כרטיס דפוק, עוברים הלאה
+
+        # עדכון פרוגרס בר
+        bar.progress(min((idx + 1) / total, 1.0))
+
+    status.success("סיימתי!")
     return data
 
-# --- ממשק משתמש ---
-st.title("🤖 הבוט האוטונומי")
-st.write("מערכת סריקה אקטיבית. הבוט ייכנס לאתר במקומך ויביא את הנתונים.")
+# --- ממשק ---
+st.title("🦅 Real Estate Hunter (Startup Mode)")
+st.write("מערכת סריקה מתקדמת עם חילוץ לינקים ומיקומים.")
 
-# בחירת אזור לסריקה (הכתובות האלו הן דוגמאות לחיפושים ביד2)
-URLS = {
-    "נתניה - כל העיר": "https://www.yad2.co.il/realestate/forsale?city=7400",
-    "תל אביב - 3-4 חדרים": "https://www.yad2.co.il/realestate/forsale?city=5000&rooms=3-4",
-    "חיפה - עד 2 מיליון": "https://www.yad2.co.il/realestate/forsale?city=4000&price=-1-2000000"
-}
+col1, col2 = st.columns([3, 1])
+with col1:
+    search_url = st.text_input("הדבק כתובת URL של חיפוש מיד2:", placeholder="https://www.yad2.co.il/realestate/forsale?city=7400")
 
-target_search = st.selectbox("בחר אזור לסריקה:", list(URLS.keys()))
+with col2:
+    st.write("") # Spacer
+    st.write("")
+    run_btn = st.button("🚀 הפעל צייד", type="primary")
 
-if st.button("🚀 הפעל את הרובוט", type="primary"):
-    target_url = URLS[target_search]
-    results = run_scraper(target_url)
-    
-    if results:
-        df = pd.DataFrame(results)
+if run_btn and search_url:
+    driver = get_driver()
+    try:
+        results = extract_yad2_data(driver, search_url)
         
-        # חישובים בסיסיים
-        if 'sqm' in df.columns and 'price' in df.columns:
-            df['ppm'] = df.apply(lambda x: x['price'] / x['sqm'] if x.get('sqm') else 0, axis=1)
-        
-        # הצגת נתונים
-        st.divider()
-        col1, col2 = st.columns(2)
-        col1.metric("נכסים שנסרקו", len(df))
-        if 'price' in df.columns:
-            col2.metric("מחיר ממוצע", f"{int(df['price'].mean()):,} ₪")
-        
-        st.dataframe(df, use_container_width=True)
-    else:
-        st.warning("הבוט סיים לרוץ אך לא הצליח לחלץ נתונים. ייתכן שיד2 חסמו את הגישה או שינו את המבנה.")
-        st.info("טיפ: אתרי נדל\"ן חוסמים שרתים בענן. הפתרון היחיד שעובד ב-100% הוא להריץ את זה מהמחשב האישי שלך.")
+        if results:
+            df = pd.DataFrame(results)
+            
+            # חישובים
+            df['ppm'] = df.apply(lambda x: int(x['price'] / x['sqm']) if x['sqm'] > 0 else 0, axis=1)
+            
+            # סידור עמודות
+            display_df = df[['address', 'rooms', 'floor', 'sqm', 'price', 'ppm', 'link']].copy()
+            
+            # הפיכת הלינק ללחיץ
+            st.data_editor(
+                display_df,
+                column_config={
+                    "address": st.column_config.TextColumn("כתובת", width="medium"),
+                    "price": st.column_config.NumberColumn("מחיר", format="%d ₪"),
+                    "ppm": st.column_config.NumberColumn("למ\"ר", format="%d ₪"),
+                    "link": st.column_config.LinkColumn("לינק למודעה", display_text="פתח מודעה 🔗"),
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            st.success(f"נמצאו {len(df)} נכסים איכותיים.")
+        else:
+            st.error("הבוט נחסם או לא מצא נכסים. נדרש שימוש ב-Residential Proxy כדי לעבוד ב-Scale.")
+            
+    except Exception as e:
+        st.error(f"שגיאה קריטית: {e}")
+    finally:
+        driver.quit()
