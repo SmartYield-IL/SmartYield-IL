@@ -1,191 +1,180 @@
 import streamlit as st
 import pandas as pd
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-import time
-import random
+import requests
+from bs4 import BeautifulSoup
+import re
+from datetime import datetime
 
 # --- הגדרת עמוד ---
-st.set_page_config(page_title="Real Estate Hunter V25", layout="wide")
+st.set_page_config(page_title="Real Estate Search Engine", layout="wide")
+st.markdown("""<style>body { direction: rtl; text-align: right; font-family: 'Segoe UI'; }</style>""", unsafe_allow_html=True)
 
-# --- CSS מקצועי ---
-st.markdown("""
-<style>
-    body { direction: rtl; text-align: right; font-family: 'Segoe UI', sans-serif; }
-    div[data-testid="stMetric"] { background-color: #f8f9fa; border-radius: 8px; padding: 10px; border: 1px solid #dee2e6; }
-</style>
-""", unsafe_allow_html=True)
+# --- מילון קודי ערים של יד2 (המוח שמאחורי הקלעים) ---
+YAD2_CITY_CODES = {
+    "תל אביב יפו": 5000,
+    "נתניה": 7400,
+    "חיפה": 4000,
+    "ירושלים": 3000,
+    "ראשון לציון": 8300,
+    "באר שבע": 9000,
+    "פתח תקווה": 7900,
+    "אשדוד": 70,
+    "חולון": 6600,
+    "רמת גן": 8600,
+    "גבעתיים": 6300,
+    "הרצליה": 6400,
+    "רעננה": 8700,
+    "כפר סבא": 6900,
+    "בת ים": 6200,
+    "חדרה": 6500,
+    "רחובות": 8400,
+    "אשקלון": 7100,
+    "מודיעין": 1200
+}
 
-# --- קונפיגורציה לסטארטאפ (כאן תכניס פרוקסי בעתיד) ---
-PROXY_SERVER = None # דוגמה: "http://user:pass@gate.smartproxy.com:7000"
-
-def get_driver():
-    options = Options()
-    options.add_argument("--headless") # רץ ברקע
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    # התחזות לדפדפן רגיל לחלוטין
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
-    options.add_argument("--window-size=1920,1080")
+# --- 1. בניית הלינק ליד2 באופן עצמאי ---
+def build_search_url(city_name, min_rooms, max_rooms, min_price, max_price):
+    city_code = YAD2_CITY_CODES.get(city_name)
+    if not city_code: return None
     
-    if PROXY_SERVER:
-        options.add_argument(f'--proxy-server={PROXY_SERVER}')
+    # בניית ה-URL המדויק שיד2 מצפים לקבל
+    url = f"https://www.yad2.co.il/realestate/forsale?city={city_code}"
+    
+    # הוספת חדרים
+    if min_rooms > 0 or max_rooms < 10:
+        url += f"&rooms={min_rooms}-{max_rooms}"
+    
+    # הוספת מחיר
+    if max_price > 0:
+        url += f"&price={min_price}-{max_price}"
         
-    return webdriver.Chrome(options=options)
+    return url
 
-def extract_yad2_data(driver, url):
-    data = []
-    status = st.empty()
-    bar = st.progress(0)
+# --- 2. שליחה ל-ZenRows (עוקף חסימות) ---
+def fetch_data(target_url, api_key):
+    proxy_url = "https://api.zenrows.com/v1/"
+    params = {
+        "apikey": api_key,
+        "url": target_url,
+        "js_render": "true",
+        "premium_proxy": "true",
+        "country": "il"
+    }
     
-    status.info("🕵️ מתחבר לאתר ומנסה לעקוף הגנות...")
-    driver.get(url)
-    
-    # השהייה רנדומלית וגלילה מדורגת (חיקוי אנושי)
-    for i in range(1, 6):
-        driver.execute_script(f"window.scrollTo(0, document.body.scrollHeight * {i/5});")
-        time.sleep(random.uniform(1.5, 3.0))
-        bar.progress(i * 10)
+    try:
+        with st.spinner(f'🤖 הרובוט סורק את {target_url}...'):
+            response = requests.get(proxy_url, params=params, timeout=60)
+            if response.status_code == 200: return response.text
+            else: st.error(f"תקלה בחיבור: {response.status_code}"); return None
+    except Exception as e:
+        st.error(f"שגיאה: {str(e)}")
+        return None
 
-    status.info("extraction... שואב נתונים...")
+# --- 3. ניתוח התוצאות ---
+def parse_results(html):
+    soup = BeautifulSoup(html, 'html.parser')
+    items = soup.find_all('div', class_=re.compile(r'(feeditem|feed_item|feed-item)', re.IGNORECASE))
     
-    # זיהוי כל הכרטיסים בעמוד (Feed Items)
-    # אנו משתמשים ב-Selectors גנריים כי יד2 משנים שמות של קלאסים
-    # אבל המבנה של "feeditem" נשאר יחסית קבוע
-    items = driver.find_elements(By.XPATH, "//div[contains(@class, 'feeditem') or contains(@class, 'feed_item')]")
-    
-    if not items:
-        # ניסיון שני - אולי המבנה שונה
-        items = driver.find_elements(By.CLASS_NAME, "feed-item-base")
-
-    total = len(items)
-    status.write(f"מצאתי {total} מודעות פוטנציאליות. מתחיל עיבוד...")
-    
-    for idx, item in enumerate(items):
+    results = []
+    for item in items:
         try:
-            # אובייקט זמני
-            listing = {
-                "address": "לא צוין",
-                "price": 0,
-                "rooms": 0,
-                "sqm": 0,
-                "floor": 0,
-                "link": "#"
-            }
+            txt = item.get_text(" ", strip=True)
             
-            # 1. חילוץ קישור (Link) - הכי חשוב!
-            try:
-                # מחפש תגית 'a' בתוך הכרטיס
-                link_elem = item.find_element(By.TAG_NAME, "a")
-                href = link_elem.get_attribute("href")
-                if href and "yad2" in href:
-                    listing["link"] = href
-            except: pass
+            # מחיר
+            price = 0
+            p_match = re.search(r'(\d{1,3}(?:,\d{3})*)\s*₪', txt)
+            if p_match: price = int(p_match.group(1).replace(',', ''))
+            if price < 100000: continue
 
-            # 2. חילוץ מחיר
-            try:
-                text_content = item.text
-                import re
-                price_match = re.search(r'(\d{1,3}(?:,\d{3})*)\s*₪', text_content)
-                if price_match:
-                    p = price_match.group(1).replace(',', '')
-                    listing["price"] = int(p)
-            except: pass
-            
-            # אם אין מחיר, מדלגים (לא מעניין)
-            if listing["price"] < 100000: continue
+            # לינק
+            link = "#"
+            a_tag = item.find('a', href=True)
+            if a_tag: 
+                href = a_tag['href']
+                link = f"https://www.yad2.co.il{href}" if href.startswith("/") else href
 
-            # 3. חילוץ כתובת (נמצאת לרוב בכותרת המשנית)
-            try:
-                # מנסה למצוא את האלמנט של הכתובת לפי מיקום יחסי או קלאס נפוץ
-                subtitle = item.find_element(By.CLASS_NAME, "subtitle").text
-                listing["address"] = subtitle
-            except:
-                # Fallback: מנסה לחלץ מהטקסט הכללי
-                lines = item.text.split('\n')
-                for line in lines:
-                    if "רחוב" in line or "דרך" in line or "שכונה" in line:
-                        listing["address"] = line
-                        break
+            # כתובת
+            address = "לא צוין"
+            sub = item.find(class_="subtitle")
+            if sub: address = sub.get_text(strip=True)
+            elif "שכונה" in txt: address = "שכונה מזוהה בטקסט"
 
-            # 4. חילוץ נתונים טכניים (חדרים, מ"ר, קומה)
-            # יד2 שמים את זה בקוביות קטנות. ננסה לחלץ מהטקסט המלא בצורה חכמה
-            full_text = item.text.replace('\n', ' ')
+            # חדרים, קומה, מ"ר
+            rooms, floor, sqm = 0, 0, 0
             
-            # חדרים
-            r_match = re.search(r'(\d+(?:\.\d+)?)\s*חד', full_text)
-            if r_match: listing["rooms"] = float(r_match.group(1))
+            r_m = re.search(r'(\d+(?:\.\d+)?)\s*חד', txt)
+            if r_m: rooms = float(r_m.group(1))
             
-            # מ"ר
-            s_matches = re.finditer(r'(\d{2,4})\s*(?:מ"ר|מר|מטר)', full_text)
+            f_m = re.search(r'קומה\s*(\d+)', txt)
+            if f_m: floor = int(f_m.group(1))
+            
+            s_matches = re.finditer(r'(\d{2,4})\s*(?:מ"ר|מר|מטר)', txt)
             for m in s_matches:
                 val = int(m.group(1))
-                if val > 30 and (listing["price"] / val > 4000): # סינון רעשים
-                    listing["sqm"] = val
-                    break
+                if 30 < val < 500 and price/val > 3000:
+                    sqm = val; break
             
-            # קומה
-            f_match = re.search(r'קומה\s*(\d+)', full_text)
-            if f_match: listing["floor"] = int(f_match.group(1))
-
-            data.append(listing)
+            ppm = int(price / sqm) if sqm > 0 else 0
             
-        except Exception as e:
-            continue # כרטיס דפוק, עוברים הלאה
+            results.append({
+                "address": address, "city": "תוצאה", "rooms": rooms, "floor": floor,
+                "sqm": sqm, "price": price, "ppm": ppm, "link": link
+            })
+        except: continue
+    return results
 
-        # עדכון פרוגרס בר
-        bar.progress(min((idx + 1) / total, 1.0))
+# --- הממשק החדש (הסטארטאפ) ---
+st.title("🔎 Real Estate Search Engine")
+st.caption("חפש דירות ביד2 ישירות מכאן - ללא צורך לצאת מהאתר.")
 
-    status.success("סיימתי!")
-    return data
+# סרגל הגדרות בצד (שמים את המפתח פעם אחת ושוכחים)
+with st.sidebar:
+    st.header("🔑 מפתח גישה")
+    api_key = st.text_input("ZenRows API Key", type="password")
+    st.info("הירשם ב-zenrows.com לקבלת מפתח חינם")
 
-# --- ממשק ---
-st.title("🦅 Real Estate Hunter (Startup Mode)")
-st.write("מערכת סריקה מתקדמת עם חילוץ לינקים ומיקומים.")
+# מנוע החיפוש הראשי
+st.container()
+c1, c2, c3 = st.columns([1, 1, 1])
 
-col1, col2 = st.columns([3, 1])
-with col1:
-    search_url = st.text_input("הדבק כתובת URL של חיפוש מיד2:", placeholder="https://www.yad2.co.il/realestate/forsale?city=7400")
+with c1:
+    city = st.selectbox("עיר", list(YAD2_CITY_CODES.keys()))
+with c2:
+    rooms_range = st.slider("טווח חדרים", 1.0, 7.0, (3.0, 5.0), step=0.5)
+with c3:
+    max_p = st.number_input("מחיר מקסימלי", 500000, 10000000, 3000000, step=100000)
 
-with col2:
-    st.write("") # Spacer
-    st.write("")
-    run_btn = st.button("🚀 הפעל צייד", type="primary")
-
-if run_btn and search_url:
-    driver = get_driver()
-    try:
-        results = extract_yad2_data(driver, search_url)
+if st.button("🔎 חפש לי דירות", type="primary", use_container_width=True):
+    if not api_key:
+        st.error("חסר מפתח API בצד ימין!")
+    else:
+        # 1. יצירת הלינק האוטומטית
+        generated_url = build_search_url(city, rooms_range[0], rooms_range[1], 0, max_p)
+        # st.write(f"Debug URL: {generated_url}") # לבדיקה
         
-        if results:
-            df = pd.DataFrame(results)
-            
-            # חישובים
-            df['ppm'] = df.apply(lambda x: int(x['price'] / x['sqm']) if x['sqm'] > 0 else 0, axis=1)
-            
-            # סידור עמודות
-            display_df = df[['address', 'rooms', 'floor', 'sqm', 'price', 'ppm', 'link']].copy()
-            
-            # הפיכת הלינק ללחיץ
-            st.data_editor(
-                display_df,
-                column_config={
-                    "address": st.column_config.TextColumn("כתובת", width="medium"),
-                    "price": st.column_config.NumberColumn("מחיר", format="%d ₪"),
-                    "ppm": st.column_config.NumberColumn("למ\"ר", format="%d ₪"),
-                    "link": st.column_config.LinkColumn("לינק למודעה", display_text="פתח מודעה 🔗"),
-                },
-                use_container_width=True,
-                hide_index=True
-            )
-            
-            st.success(f"נמצאו {len(df)} נכסים איכותיים.")
-        else:
-            st.error("הבוט נחסם או לא מצא נכסים. נדרש שימוש ב-Residential Proxy כדי לעבוד ב-Scale.")
-            
-    except Exception as e:
-        st.error(f"שגיאה קריטית: {e}")
-    finally:
-        driver.quit()
+        # 2. שליחת הרובוט
+        html = fetch_data(generated_url, api_key)
+        
+        # 3. הצגת תוצאות
+        if html:
+            data = parse_results(html)
+            if data:
+                df = pd.DataFrame(data)
+                
+                st.success(f"נמצאו {len(df)} דירות ב{city}!")
+                
+                # טבלה אינטראקטיבית עם תמונות ולינקים
+                st.data_editor(
+                    df[['address', 'rooms', 'floor', 'sqm', 'price', 'ppm', 'link']],
+                    column_config={
+                        "address": st.column_config.TextColumn("כתובת", width="medium"),
+                        "price": st.column_config.NumberColumn("מחיר", format="%d ₪"),
+                        "ppm": st.column_config.NumberColumn("למ\"ר", format="%d ₪"),
+                        "link": st.column_config.LinkColumn("צפייה", display_text="פתח מודעה 🔗"),
+                        "rooms": st.column_config.NumberColumn("חד'", format="%.1f"),
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.warning("החיפוש עבד, אך לא נמצאו תוצאות שתואמות את הסינון.")
